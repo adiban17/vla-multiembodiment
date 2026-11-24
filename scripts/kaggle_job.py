@@ -104,6 +104,75 @@ def hello() -> Path:
     return run_dir
 
 
+def log_dataset(job: str, run_dir: Path, config: dict, meta: dict, images: list | None = None) -> None:
+    """Log a data job's stats, videos and images to W&B, and save metrics.json."""
+    import wandb
+
+    metrics = {k: v for k, v in meta.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    run = wandb.init(project=WANDB_PROJECT, job_type="data", name=run_dir.name,
+                     config={**config, "meta": meta}, dir=str(run_dir))
+    media = {f"video/{p.stem}": wandb.Video(str(p), format="mp4") for p in sorted((run_dir / "videos").glob("*.mp4"))}
+    media.update({f"image/{Path(p).stem}": wandb.Image(str(p)) for p in images or []})
+    if media:
+        run.log(media)
+    run.summary.update(metrics)
+    run.finish()
+    print(f"Saved run folder: {run_dir}")
+
+
+def _start_data_run(job: str, extra: dict) -> tuple[Path, dict]:
+    git = git_commit()
+    run_dir = new_run_dir(job, git["commit"])
+    config = {"job": job, "on_kaggle": is_kaggle(), "python": platform.python_version(),
+              "git_commit": git["commit"], "git_dirty": git["dirty"], **extra}
+    save_run_info(run_dir, config, git)
+    print(f"{job}: writing to {run_dir} (commit {git['commit'][:7]})")
+    return run_dir, config
+
+
+@register("data_pusht")
+def data_pusht() -> Path:
+    """Phase 1: export lerobot/pusht (CPU is enough) via a separate Python 3.12 lerobot env."""
+    from vla.data.lerobot_env import run_pusht_export
+    from vla.data.pusht_compare import save_pusht_compare
+    from vla.data.shards import read_meta
+
+    run_dir, config = _start_data_run("data_pusht", {"requirements": "requirements-lerobot.txt"})
+    venv = Path("/tmp/lerobot-venv") if is_kaggle() else Path("runs/debug/lerobot-venv").resolve()
+    run_pusht_export(run_dir, venv_dir=venv)
+    compare_png = run_dir / "pusht_compare.png"
+    save_pusht_compare(run_dir, compare_png)
+    log_dataset("data_pusht", run_dir, config, read_meta(run_dir), images=[compare_png])
+    return run_dir
+
+
+def _data_fetch(job: str, n_success: int) -> Path:
+    from vla.data.collect_fetch import collect
+    from vla.envs.fetch import renderer_name
+
+    if not is_kaggle():
+        print("WARNING: not on Kaggle, so these images are debug-only and will be refused for training.")
+    run_dir, config = _start_data_run(job, {"n_success": n_success, "renderer": renderer_name()})
+    meta = collect(run_dir, n_success=n_success, render=True)
+    if is_kaggle() and not meta["images_for_training"]:
+        raise RuntimeError(f"images were rendered with {meta['image_source']!r}, not EGL; check MUJOCO_GL")
+    log_dataset(job, run_dir, config, meta)
+    return run_dir
+
+
+@register("data_fetch_smoke")
+def data_fetch_smoke() -> Path:
+    """Phase 1: 5 FetchPush demos with EGL images (checks rendering and the pipeline)."""
+    return _data_fetch("data_fetch_smoke", n_success=5)
+
+
+@register("data_fetch")
+def data_fetch() -> Path:
+    """Phase 1: 500 successful FetchPush demos with EGL images (the training set)."""
+    return _data_fetch("data_fetch", n_success=500)
+
+
 # --- command line -----------------------------------------------------------
 
 

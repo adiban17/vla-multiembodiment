@@ -40,6 +40,17 @@ Change `hello` to the job you want. `python scripts/kaggle_job.py --list` shows 
 !python scripts/kaggle_job.py --job hello
 ```
 
+## Jobs
+| Job | Accelerator | What it does | Time (estimate) |
+| --- | --- | --- | --- |
+| `hello` | GPU T4 x2 | prints GPUs + commit, tiny W&B run | 1 min |
+| `data_pusht` | None (CPU) is enough | builds a separate Python 3.12 lerobot env, exports lerobot/pusht (206 episodes) to .npz, 3 videos, `pusht_compare.png` | 15-40 min |
+| `data_fetch_smoke` | GPU T4 x2 (EGL rendering) | 5 FetchPush demos with images, 3 videos | 1 min |
+| `data_fetch` | GPU T4 x2 (EGL rendering) | 500 FetchPush demos with images, 3 videos | 15-30 min |
+
+Run `data_fetch_smoke` before `data_fetch`, and watch its videos in W&B first.
+For long jobs use **Save Version → Save & Run All (Commit)** so the outputs are kept.
+
 ## Where results go
 - Each run writes a folder to `/kaggle/working/outputs/<run_id>/` with `config.yaml`, `git.txt`
   and `metrics.json`, and logs to the W&B project `vla-multiembodiment`.

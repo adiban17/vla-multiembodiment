@@ -9,5 +9,17 @@ pyyaml==6.0.4
 wandb==0.31.2
 pytest==9.2.0
 
+# Simulators and video (Phase 1). mujoco is held at 3.9.0: gymnasium-robotics 1.4.2
+# crashes with mujoco 4.x (FetchPush reset fails on a joint-type check).
+gymnasium==1.4.0
+gym-pusht==0.1.8
+gymnasium-robotics==1.4.2
+mujoco==3.9.0
+imageio==2.38.2
+imageio-ffmpeg==0.8.1
+
+# Builds the separate Python 3.12 env for lerobot (job data_pusht)
+uv==0.10.7
+
 # This repo itself, so `import vla` works
 -e .

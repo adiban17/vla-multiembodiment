@@ -49,7 +49,7 @@ def test_get_device_never_returns_mps(monkeypatch):
 
 # --- pinned dependencies ----------------------------------------------------
 
-@pytest.mark.parametrize("name", ["requirements.txt", "requirements-kaggle.txt"])
+@pytest.mark.parametrize("name", ["requirements.txt", "requirements-kaggle.txt", "requirements-lerobot.txt"])
 def test_requirements_are_pinned(name):
     for line in _requirement_lines(name):
         if line == "-e .":
@@ -61,6 +61,8 @@ def test_kaggle_requirements_skip_preinstalled_packages():
     names = {re.split(r"[=<>\[]", ln)[0].lower() for ln in _requirement_lines("requirements-kaggle.txt")}
     for preinstalled in ["torch", "torchvision", "transformers", "numpy"]:
         assert preinstalled not in names, f"{preinstalled} must not be in requirements-kaggle.txt"
+    # lerobot pins its own torch; it lives only in requirements-lerobot.txt (separate env).
+    assert "lerobot" not in names
 
 
 # --- git commit tracking ----------------------------------------------------
@@ -121,3 +123,16 @@ def test_code_folders_are_not_gitignored():
     paths = ["src/vla/data/dataset.py", "src/vla/models/policy.py", "configs/base.yaml"]
     out = subprocess.run(["git", "check-ignore", *paths], cwd=REPO, capture_output=True, text=True)
     assert out.stdout.strip() == "", f"wrongly ignored: {out.stdout}"
+
+
+def test_env_example_has_no_secret_values():
+    for line in (REPO / ".env.example").read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key, value = line.split("=", 1)
+            assert value.strip() == "", f"{key} in .env.example must be empty (put real values in .env)"
+
+
+def test_phase1_jobs_are_registered():
+    kaggle_job = _load_kaggle_job()
+    for name in ["data_pusht", "data_fetch_smoke", "data_fetch"]:
+        assert name in kaggle_job.JOBS, f"job {name} missing"

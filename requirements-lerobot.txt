@@ -1,0 +1,11 @@
+# Isolated Python 3.12 env, ONLY for exporting lerobot/pusht (job "data_pusht").
+# lerobot 0.7.0 needs Python >= 3.12 and pins its own torch and numpy, so it never goes in
+# requirements.txt or requirements-kaggle.txt. Install with CPU-only torch:
+#   uv venv --python 3.12 <env>
+#   uv pip install --python <env>/bin/python --torch-backend cpu -r requirements-lerobot.txt
+lerobot[dataset]==0.7.0
+imageio==2.38.2
+imageio-ffmpeg==0.8.1
+
+# This repo itself (the exporter uses vla.data.shards and vla.utils.video)
+-e .

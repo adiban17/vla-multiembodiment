@@ -39,14 +39,23 @@ The user is new to Claude Code, Python packaging and robotics: explain what you 
    training and evaluation. Never write a second copy of image preprocessing.
 4. **Write each phase's checks before its code**, as tests in `tests/` or scripts, using the gate
    from the roadmap in `docs/spec.md`. Then implement until they pass.
-5. **Stop after each phase and report**: show the check output, list the files changed, and say
+5. **Training images come from the evaluation renderer only.** FetchPush training images must be
+   rendered with EGL on Kaggle; PushT training images come from the LeRobot dataset. Mac-rendered
+   images are debug-only (save them under `runs/debug/`). Every dataset's `meta.json` records
+   `image_source` and `images_for_training`; call `vla.data.shards.assert_training_images_ok(meta)`
+   before training on a dataset.
+6. **lerobot lives in its own env.** lerobot 0.7.0 needs Python 3.12 and pins its own torch/numpy, so
+   it is only in `requirements-lerobot.txt`, installed by `vla.data.lerobot_env` into a separate uv
+   env. Never add it to `requirements.txt` or `requirements-kaggle.txt`.
+7. **Stop after each phase and report**: show the check output, list the files changed, and say
    what the user must run on Kaggle. Do not start the next phase.
 
 ## Layout
 ```
 configs/                 YAML configs (base, cond/, adapt/, baseline/)
 src/vla/envs/            PushT and FetchPush wrappers
-src/vla/data/            loaders, scripted expert, dataset, normalization, feature cache
+src/vla/data/            shards.py (.npz format), fetch_expert, collect_fetch, pusht_loader (lerobot env),
+                         lerobot_env, pusht_compare; later: dataset, normalization, feature cache
 src/vla/models/          encoders (+ preprocess_image), trunk, conditioning, policy, baselines
 src/vla/utils/           runtime.py (paths, device), tracking.py (git, run info), config, seed
 src/vla/train.py, evaluate.py
@@ -65,3 +74,6 @@ notebooks/kaggle_cells.md   the two Kaggle cells
 
 ## Progress
 - Phase 0 (setup): done. The Kaggle `hello` job is the GPU gate.
+- Phase 1 (envs + data): built and tested on the Mac. Kaggle jobs `data_pusht`, `data_fetch_smoke`,
+  `data_fetch` not run yet. Pins: mujoco 3.9.0 (gymnasium-robotics 1.4.2 breaks on mujoco 4.x).
+  FetchPush camera: `vla.envs.fetch.CAMERA` (45° front view, 128x128); the arm sometimes hides the cube.
