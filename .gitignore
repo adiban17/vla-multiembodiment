@@ -1,0 +1,21 @@
+# Secrets: never commit. Copy .env.example to .env and fill it in.
+.env
+
+# Big or generated files: they live on Kaggle (/kaggle/working/outputs), not in git.
+# The leading / means "only at the repo top level", so src/vla/data/ (code) is NOT ignored.
+/data/
+/outputs/
+/runs/
+wandb/
+
+# Python environment and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.cache/
+*.egg-info/
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store

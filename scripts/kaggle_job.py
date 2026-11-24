@@ -1,0 +1,137 @@
+"""The one entry point for all work run on Kaggle (and locally on CPU).
+
+Kaggle notebook cell 2 runs:   python scripts/kaggle_job.py --job <name>
+List the jobs:                  python scripts/kaggle_job.py --list
+
+To add work, write a function and decorate it with @register("name"). Each job returns
+its run folder. Every job must save its resolved config and git commit (save_run_info).
+"""
+
+import argparse
+import json
+import os
+import platform
+import sys
+import time
+from pathlib import Path
+
+from vla.utils.runtime import get_device, is_kaggle, load_dotenv_if_local, outputs_dir
+from vla.utils.tracking import git_commit, save_run_info
+
+WANDB_PROJECT = "vla-multiembodiment"
+
+JOBS = {}  # job name -> function
+
+
+def register(name):
+    """Decorator that adds a function to JOBS under `name`."""
+
+    def add(fn):
+        JOBS[name] = fn
+        return fn
+
+    return add
+
+
+def new_run_dir(job: str, commit: str) -> Path:
+    """<outputs>/<job>-<commit7>-<timestamp>/, for example hello-3f9a2c1-20261125-213000."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return outputs_dir() / f"{job}-{commit[:7]}-{stamp}"
+
+
+# --- jobs ---------------------------------------------------------------------
+
+
+@register("hello")
+def hello() -> Path:
+    """Phase 0 gate: print GPUs and git commit, log a tiny test run to W&B."""
+    import torch
+    import wandb
+
+    device = get_device()
+    gpus = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+    git = git_commit()
+
+    print(f"Python {platform.python_version()} | torch {torch.__version__} | CUDA {torch.version.cuda}")
+    print(f"On Kaggle: {is_kaggle()} | device: {device}")
+    print("GPUs:", ", ".join(f"[{i}] {name}" for i, name in enumerate(gpus)) or "no CUDA GPU (CPU)")
+    print(f"Git commit: {git['commit']} (uncommitted changes: {git['dirty']})")
+
+    run_dir = new_run_dir("hello", git["commit"])
+    config = {
+        "job": "hello",
+        "seed": 0,
+        "steps": 50,
+        "lr": 0.1,
+        "device": device,
+        "gpus": gpus,
+        "on_kaggle": is_kaggle(),
+        "python": platform.python_version(),
+        "torch": str(torch.__version__),  # TorchVersion object -> plain string for YAML
+        "git_commit": git["commit"],
+        "git_dirty": git["dirty"],
+    }
+    save_run_info(run_dir, config, git)
+
+    run = wandb.init(
+        project=WANDB_PROJECT, job_type="hello", name=run_dir.name, config=config, dir=str(run_dir)
+    )
+
+    # Tiny test run: learn y = 3x + 1 with a single linear layer.
+    torch.manual_seed(config["seed"])
+    x = torch.randn(256, 1, device=device)
+    y = 3 * x + 1
+    model = torch.nn.Linear(1, 1).to(device)
+    optimizer = torch.optim.SGD(model.parameters(), lr=config["lr"])
+    for step in range(config["steps"]):
+        loss = torch.nn.functional.mse_loss(model(x), y)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        wandb.log({"loss": loss.item()}, step=step)
+
+    metrics = {
+        "final_loss": loss.item(),
+        "weight": model.weight.item(),
+        "bias": model.bias.item(),
+    }
+    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    run.summary.update(metrics)
+    run.finish()
+
+    print(f"Tiny run: loss {metrics['final_loss']:.5f}, learned y = {metrics['weight']:.3f}x + {metrics['bias']:.3f}")
+    print(f"Saved run folder: {run_dir}")
+    return run_dir
+
+
+# --- command line -----------------------------------------------------------
+
+
+def check_wandb_key() -> None:
+    """Fail early with a clear message instead of W&B asking for a key mid-run."""
+    if os.environ.get("WANDB_MODE") in ("offline", "disabled") or os.environ.get("WANDB_API_KEY"):
+        return
+    if is_kaggle():
+        sys.exit("WANDB_API_KEY is not set. Add it in Kaggle (Add-ons > Secrets) and re-run cell 1.")
+    print("No WANDB_API_KEY in .env, so W&B logs offline (files only).")
+    os.environ["WANDB_MODE"] = "offline"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--job", choices=sorted(JOBS), help="name of the job to run")
+    parser.add_argument("--list", action="store_true", help="list the available jobs")
+    args = parser.parse_args()
+
+    if args.list or not args.job:
+        for name, fn in sorted(JOBS.items()):
+            print(f"{name:12s} {(fn.__doc__ or '').strip().splitlines()[0]}")
+        return
+
+    load_dotenv_if_local()
+    check_wandb_key()
+    JOBS[args.job]()
+
+
+if __name__ == "__main__":
+    main()

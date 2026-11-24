@@ -1,0 +1,13 @@
+# Kaggle (GPU). Cell 1 runs, from /tmp/repo:
+#   pip install -q -r requirements-kaggle.txt
+# Do NOT list torch, torchvision, transformers or numpy: Kaggle already has versions
+# built for its CUDA, and reinstalling them can break the GPU setup.
+# Pins match requirements.txt.
+
+omegaconf==2.4.0
+pyyaml==6.0.4
+wandb==0.31.2
+pytest==9.2.0
+
+# This repo itself, so `import vla` works
+-e .

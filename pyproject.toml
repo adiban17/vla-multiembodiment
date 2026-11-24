@@ -1,0 +1,19 @@
+# Makes src/vla an installable package, so `import vla` works on the Mac and on Kaggle.
+# Dependencies are NOT listed here: they are pinned in requirements.txt (Mac) and
+# requirements-kaggle.txt (Kaggle), which both install this package with `-e .`.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vla"
+version = "0.0.1"
+description = "One VLA policy for two robots (PushT and FetchPush), with conditioning and adaptation ablations."
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,22 @@
+# Mac (CPU-only tests). Install with:
+#   uv pip install --python .venv/bin/python -r requirements.txt
+# Every version is pinned with ==. Add packages in the phase that first needs them.
+# On macOS arm64 the PyPI torch wheel is the CPU build (we never use the "mps" device).
+
+# Deep learning (Kaggle already ships its own copies; see requirements-kaggle.txt)
+torch==2.15.0
+torchvision==0.29.2
+transformers==5.24.1
+numpy==2.4.6
+
+# Configs, tracking, testing (same pins as requirements-kaggle.txt)
+omegaconf==2.4.0
+pyyaml==6.0.4
+wandb==0.31.2
+pytest==9.2.0
+
+# Mac only: reads WANDB_API_KEY from the gitignored .env file
+python-dotenv==1.2.4
+
+# This repo itself, so `import vla` works
+-e .
