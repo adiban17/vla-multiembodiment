@@ -26,6 +26,10 @@ The user is new to Claude Code, Python packaging and robotics: explain what you 
 - **Paths on Kaggle:** write outputs to `/kaggle/working/outputs/`. Read earlier outputs (attached
   as datasets) from `/kaggle/input/`. Use `vla.utils.runtime.outputs_dir()` and `inputs_dir()`.
   On the Mac, outputs go to `./outputs/` (gitignored).
+- **Frozen runs train 4,000 steps with 300 warmup steps** (spec: 20k and 500). Reason: Kaggle job
+  `smoke_train` measured 2.0 steps/s on a T4 at batch 256, so 20k steps would take about 3 hours.
+  The budget is 45 minutes per run including evaluation; 4,000 steps is about 33 minutes of training.
+  Validation stays every 1,000 steps. The defaults live in `configs/base.yaml`.
 - **Secrets never go in git.** On the Mac, use the gitignored `.env` (template: `.env.example`).
   On Kaggle, use Kaggle Secrets.
 
@@ -58,8 +62,10 @@ src/vla/data/            shards.py (.npz format), fetch_expert, collect_fetch, p
                          lerobot_env, pusht_compare, normalize, instructions, dataset, cache_features
 src/vla/models/          encoders (+ preprocess_image), trunk, conditioning, policy, baselines
 src/vla/utils/           runtime.py (paths, device), tracking.py (git, run info), config, seed
-src/vla/train.py, evaluate.py
+src/vla/train.py         trains, then evaluates the final model (cfg.eval)
+src/vla/evaluate.py      rollout harness: expert/random/VLA policies, Wilson intervals, videos
 scripts/kaggle_job.py    registry of named jobs run on Kaggle (and locally on CPU)
+scripts/run_queue.py     runs configs two at a time (one per GPU), skips runs finished in W&B
 tests/                   checks, written before each phase's code
 notebooks/kaggle_cells.md   the two Kaggle cells
 ```
@@ -88,3 +94,9 @@ notebooks/kaggle_cells.md   the two Kaggle cells
   Config groups: `cond=`, `adapt=`, `size=full|tiny` (`vla.utils.config.load_config`). Loss = average of the
   PushT and FetchPush masked-L1 means (equal weight per robot; same rule for val loss).
   `python -m vla.train size=tiny --allow-dirty` trains locally (Mac debug caches allowed only with size=tiny).
+- Phase 4 (evaluation + first batch): built and tested on the Mac. Kaggle jobs `eval_sanity`, `batch_conditioning`
+  not run yet. Rollouts use env seeds 100000-100049 and execute 8 of 16 actions per call; eval features are rounded
+  to fp16 like the cache. Every run folder holds copies of stats.json and language.npy. `run_key` =
+  `{cond}-{adapt}-{size}-s{seed}-{steps}steps` (no commit) is what the queue uses to skip finished W&B runs.
+  The queue gives each run 2 data-loader workers when 2 run at once (`data.num_workers` affects which instruction
+  each sample gets, so it is part of the config). `python -m vla.evaluate --policy expert|random|<run_dir>`.

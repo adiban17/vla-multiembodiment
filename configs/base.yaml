@@ -29,15 +29,23 @@ data:
 optim:
   lr: 3.0e-4
   weight_decay: 0.01
-  warmup_steps: 500
+  warmup_steps: 300         # spec: 500; shortened with train.steps (see CLAUDE.md)
   grad_clip: 1.0
 
 train:
-  steps: 20000
+  steps: 4000               # spec: 20k; a T4 does 2.0 steps/s at batch 256 (see CLAUDE.md)
   val_every: 1000
   log_every: 50
   amp: true                 # fp16 autocast + GradScaler, CUDA only (T4 has no bf16)
   save_checkpoint: true
+
+eval:                       # closed-loop rollouts of the final model (docs/spec.md "Evaluation protocol")
+  enabled: true
+  n_episodes: 50            # per robot
+  seed_start: 100000        # env seeds 100000..100049, the same for every run
+  exec_steps: 8             # execute the first 8 of the 16 predicted actions, then predict again
+  n_videos: 3               # per robot: one success, one failure, one random episode
+  paraphrase: 0             # instruction: 0-7 = training sentences, 8-9 = held out
 
 wandb:
   project: vla-multiembodiment

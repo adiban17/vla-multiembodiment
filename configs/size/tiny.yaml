@@ -20,3 +20,5 @@ train:
   log_every: 10
   amp: false
   save_checkpoint: true
+eval:
+  n_episodes: 2

@@ -28,7 +28,10 @@ def test_config_groups_and_overrides():
     assert (cfg.cond, cfg.adapt, cfg.size) == ("film", "frozen", "full")
     assert cfg.model.width == 384 and cfg.model.depth == 8 and cfg.model.heads == 6 and cfg.model.ffn == 1536
     assert cfg.data.batch_size == 256 and cfg.optim.lr == pytest.approx(3e-4)
-    assert cfg.optim.warmup_steps == 500 and cfg.train.steps == 20000 and cfg.train.val_every == 1000
+    # 4000/300, not the spec's 20k/500: measured 2.0 steps/s on a T4 (CLAUDE.md)
+    assert cfg.optim.warmup_steps == 300 and cfg.train.steps == 4000 and cfg.train.val_every == 1000
+    assert cfg.eval.enabled and cfg.eval.n_episodes == 50 and cfg.eval.seed_start == 100000
+    assert cfg.eval.exec_steps == 8 and cfg.eval.paraphrase == 0
 
     cfg = load_config(["cond=token", "size=tiny", "train.steps=7"])
     assert (cfg.cond, cfg.size) == ("token", "tiny")
@@ -140,7 +143,8 @@ def local_env(tmp_path, monkeypatch):
 
 
 def _tiny_cfg(*extra):
-    return load_config(["size=tiny", "train.steps=6", "train.val_every=3", "train.log_every=2", *extra])
+    return load_config(["size=tiny", "train.steps=6", "train.val_every=3", "train.log_every=2",
+                        "eval.enabled=false", *extra])
 
 
 def test_tiny_training_run_end_to_end(synthetic_cache, local_env):

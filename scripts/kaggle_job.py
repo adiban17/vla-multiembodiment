@@ -11,8 +11,11 @@ import argparse
 import json
 import os
 import platform
+import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # so `import run_queue` works however we are loaded
 
 from vla.utils.runtime import get_device, is_kaggle, load_dotenv_if_local, outputs_dir
 from vla.utils.tracking import check_wandb_key, git_commit, save_run_info
@@ -299,7 +302,7 @@ def smoke_train() -> Path:
 
     print(f"GPUs visible: {torch.cuda.device_count()} "
           f"({', '.join(torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())) or 'none, CPU'})")
-    cfg = load_config(["cond=film", "adapt=frozen", "train.steps=1000"])
+    cfg = load_config(["cond=film", "adapt=frozen", "train.steps=1000", "eval.enabled=false"])
     run_dir = train(cfg, run_prefix="smoke-")
 
     m = json.loads((run_dir / "metrics.json").read_text())
@@ -308,8 +311,9 @@ def smoke_train() -> Path:
     print(f"GPU:              {m['gpu'] or 'none (CPU)'}")
     print(f"Batch size:       {m['batch_size']} (half PushT, half FetchPush)")
     print(f"Trainable params: {m['trainable_params']:,}")
-    print(f"Steps per second: {m['steps_per_sec']:.2f}  ->  20k steps take about "
-          f"{20000 / m['steps_per_sec'] / 60:.0f} min (training only, no evaluation)")
+    default_steps = int(load_config().train.steps)
+    print(f"Steps per second: {m['steps_per_sec']:.2f}  ->  {default_steps:,} steps (the default) take about "
+          f"{default_steps / m['steps_per_sec'] / 60:.0f} min (training only, no evaluation)")
     print(f"Per step:         data wait {m['data_ms_per_step']:.1f} ms, compute {m['compute_ms_per_step']:.1f} ms")
     print(f"GPU waits for data {wait:.0f}% of the time"
           + ("  -> data loading is the bottleneck" if wait > 20 else "  -> fine, the GPU is kept busy"))
@@ -318,6 +322,107 @@ def smoke_train() -> Path:
     print(f"Loss:             train {m['train_loss']:.4f} | val {m['val_loss']:.4f} "
           f"(pusht {m['val_loss_pusht']:.4f}, fetch {m['val_loss_fetch']:.4f})")
     return run_dir
+
+
+# --- Phase 4: evaluation and the first experiment batch -----------------------
+
+BATCH_WORKERS_PER_RUN = 2  # 2 runs share Kaggle's 4 CPU cores (and the simulators in evaluation)
+CONDITIONING_VARIANTS = ("token", "film", "sep_heads")
+SEEDS = (0, 1, 2)
+
+
+def conditioning_configs() -> list[list[str]]:
+    """The 9 conditioning runs, seed-major: seed 0 of every variant runs first, so a batch cut
+    short still has a complete comparison at seed 0."""
+    return [[f"cond={c}", f"seed={s}"] for s in SEEDS for c in CONDITIONING_VARIANTS]
+
+
+def eval_sanity_film_overrides() -> list[str]:
+    """film seed 0 exactly as batch_conditioning's queue builds it (same config, same run key),
+    so the batch later skips it instead of training it twice. A test checks they match."""
+    from run_queue import plan_jobs
+
+    (job,) = plan_jobs([["cond=film", "seed=0"]], workers_per_run=BATCH_WORKERS_PER_RUN)
+    return job["overrides"]
+
+
+@register("eval_sanity")
+def eval_sanity() -> Path:
+    """Phase 4 gate: expert and random policy through the harness, then one full FiLM seed-0 run with evaluation."""
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")  # one GPU; must be set before CUDA starts
+    import wandb
+
+    from vla.data.collect_fetch import run_episode
+    from vla.evaluate import ROBOTS, SEED_START, ExpertPolicy, RandomPolicy, evaluate_policy, flat_metrics, print_summary
+    from vla.train import run_key, train
+    from vla.utils.config import load_config
+
+    n = 50
+    run_dir, config = _start_data_run("eval_sanity", {"n_episodes": n, "seed_start": SEED_START, "exec_steps": 8})
+
+    print("\n(a) Scripted FetchPush expert through the harness (EGL videos of 3 episodes)")
+    expert = evaluate_policy(ExpertPolicy(), ("fetch",), n, SEED_START, 8, n_videos=3,
+                             video_dir=run_dir / "videos", video_tag="_expert")
+    print_summary(expert, "expert policy")
+    plain = [run_episode(SEED_START + i, render=False, noise_std=0.1)["success"] for i in range(n)]
+    harness = [e["success"] for e in expert["fetch"]["episodes"]]
+    expert_matches = harness == plain
+    print(f"Plain expert loop on the same seeds: {sum(plain)}/{n} = {sum(plain) / n:.0%} | "
+          f"harness gives identical per-episode results: {expert_matches}")
+
+    print("\n(b) Random policy, both robots (should be about 0%)")
+    random_result = evaluate_policy(RandomPolicy(), ROBOTS, n, SEED_START, 8)
+    print_summary(random_result, "random policy")
+
+    metrics = {"expert_fetch_success": expert["fetch"]["success_rate"], "expert_plain_loop_success": sum(plain) / n,
+               "expert_matches_plain_loop": expert_matches,
+               **{f"random_{k}": v for k, v in flat_metrics(random_result).items()},
+               "expert": expert, "random": random_result}
+    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    run = wandb.init(project=WANDB_PROJECT, job_type="eval_sanity", name=run_dir.name, config=config, dir=str(run_dir))
+    run.log({f"video/{Path(p).stem}": wandb.Video(p, format="mp4") for p in expert["fetch"]["videos"]})
+    run.summary.update({k: v for k, v in metrics.items() if not isinstance(v, dict)})
+    run.finish()
+
+    print("\n(c) One full FiLM seed-0 run with evaluation (the same run batch_conditioning would do first)")
+    cfg = load_config(eval_sanity_film_overrides())
+    print(f"Run key {run_key(cfg)} | {cfg.train.steps} steps | data-loader workers {cfg.data.num_workers}")
+    film_dir = train(cfg)
+    m = json.loads((film_dir / "metrics.json").read_text())
+
+    remaining = len(conditioning_configs()) - 1  # batch_conditioning skips this run
+    print("\n=== eval_sanity summary ===")
+    print(f"Expert (FetchPush):      {expert['fetch']['successes']}/{n} = {expert['fetch']['success_rate']:.0%} through "
+          f"the harness; plain loop {sum(plain) / n:.0%}; identical: {expert_matches}")
+    print(f"Random policy:           PushT {random_result['pusht']['success_rate']:.0%} "
+          f"(mean max coverage {random_result['pusht']['mean_max_coverage']:.3f}), "
+          f"FetchPush {random_result['fetch']['success_rate']:.0%}")
+    print(f"FiLM s0 ({m['steps']} steps):   PushT {m['pusht_success']:.0%} "
+          f"[{m['pusht_wilson_low']:.0%}, {m['pusht_wilson_high']:.0%}], max coverage {m['pusht_mean_max_coverage']:.3f} | "
+          f"FetchPush {m['fetch_success']:.0%} [{m['fetch_wilson_low']:.0%}, {m['fetch_wilson_high']:.0%}] | "
+          f"mean {m['mean_success']:.0%}")
+    print(f"Val loss:                {m['val_loss']:.4f} (pusht {m['val_loss_pusht']:.4f}, fetch {m['val_loss_fetch']:.4f})")
+    print(f"Time per run (1 GPU):    train {m['train_minutes']:.1f} min ({m['steps_per_sec']:.2f} steps/s, "
+          f"GPU waits for data {100 * m['data_wait_fraction']:.0f}%) + evaluation {m['eval_minutes']:.1f} min "
+          f"(PushT {m['pusht_eval_seconds'] / 60:.1f}, FetchPush {m['fetch_eval_seconds'] / 60:.1f}) "
+          f"= {m['total_minutes']:.1f} min")
+    print(f"batch_conditioning:      {remaining} runs left, 2 at a time -> about "
+          f"{-(-remaining // 2) * m['total_minutes'] / 60:.1f} h if two parallel runs do not slow each other down")
+    if not expert_matches:
+        raise RuntimeError("the harness and the plain expert loop disagree: the harness has a bug")
+    return run_dir
+
+
+@register("batch_conditioning")
+def batch_conditioning() -> Path:
+    """Phase 4: token, film, sep_heads x seeds 0, 1, 2 (4,000 steps + evaluation), 2 at a time; skips finished runs."""
+    from run_queue import run_queue
+
+    rows = run_queue(conditioning_configs(), workers_per_run=BATCH_WORKERS_PER_RUN)
+    failed = [r["key"] or r["label"] for r in rows if r["status"] in ("failed", "timeout")]
+    if failed:
+        raise RuntimeError(f"{len(failed)} runs failed: {failed}. Run a new version to retry only those.")
+    return outputs_dir()
 
 
 # --- command line -----------------------------------------------------------

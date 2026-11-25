@@ -50,6 +50,8 @@ Change `hello` to the job you want. `python scripts/kaggle_job.py --list` shows 
 | `cache_features_smoke` | GPU T4 x2 | feature cache of the first 3 episodes per robot; prints the datasets found, stats, sizes and the cached-vs-live check | 2-3 min |
 | `cache_features` | GPU T4 x2 | DINOv2 + MiniLM features (fp16), raw images (uint8), `stats.json`, `size_report.json` for all episodes | 10-30 min |
 | `smoke_train` | GPU T4 x2 (uses one) | FiLM policy, 1,000 training steps; prints steps/sec, peak GPU memory, data-wait vs compute time per step, train and val loss | 5-15 min |
+| `eval_sanity` | GPU T4 x2 (uses one) | scripted expert and random policy through the evaluation harness, then one full FiLM seed-0 run (4,000 steps + 50 rollouts per robot); prints the time per run | 45-60 min |
+| `batch_conditioning` | GPU T4 x2 (both) | token, film, sep_heads x seeds 0, 1, 2, two runs at a time (2 data-loader workers each); skips runs already finished in W&B; prints a results table | about 4 h |
 
 Run `data_fetch_smoke` before `data_fetch`, and watch its videos in W&B first.
 
@@ -65,6 +67,14 @@ nothing else is needed. The job searches `/kaggle/input/` for a folder with `sta
 `fetch/` feature subfolders, prints what it found, and uses the one with the most frames. It refuses
 caches with debug-only (Mac-rendered) images, and refuses to start if the cloned code has uncommitted
 changes. Send back the `=== smoke_train summary ===` block: it fills in the compute table.
+
+**Before `eval_sanity` and `batch_conditioning`:** **Add Input** → the saved output of your
+`cache_features` notebook (as for `smoke_train`). Run both as **Save Version → Save & Run All (Commit)**.
+Run `eval_sanity` first and send back its `=== eval_sanity summary ===` block. Its FiLM run is exactly
+`film-s0` of the batch (same config and run key), so `batch_conditioning` skips it and trains the
+other 8. If a batch version stops early or a run fails, just run a new version: runs already finished
+in W&B are skipped. Each run writes `metrics.json` with success rates, 95% Wilson intervals and the
+evaluation time, and logs 3 rollout videos per robot to W&B.
 
 ## Where results go
 - Each run writes a folder to `/kaggle/working/outputs/<run_id>/` with `config.yaml`, `git.txt`

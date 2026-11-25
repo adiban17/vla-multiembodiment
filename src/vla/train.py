@@ -13,12 +13,17 @@ What one run does:
 4. Every batch is 50% PushT, 50% FetchPush. The loss weights the two robots equally.
 5. AdamW, 500 warmup steps then cosine decay to 0, fp16 autocast + GradScaler on CUDA,
    gradient clipping at 1.0. Logs to W&B; validation loss every 1,000 steps.
-6. Writes a run folder: config.yaml, git.txt, metrics.json, ckpt.pt.
+6. Writes a run folder: config.yaml, git.txt, metrics.json, ckpt.pt, plus copies of the cache's
+   stats.json and language.npy (so the run folder alone is enough to evaluate it).
+7. Evaluates the final model with closed-loop rollouts (vla.evaluate; 50 episodes per robot) and
+   adds the success rates to metrics.json and W&B. ckpt.pt is saved first, so a crash during
+   evaluation never loses the training.
 """
 
 import argparse
 import json
 import math
+import shutil
 import time
 from pathlib import Path
 
@@ -158,6 +163,12 @@ def validate(model, val_sets, cfg, device: str, use_amp: bool) -> dict:
 # --- run folder -------------------------------------------------------------------
 
 
+def run_key(cfg) -> str:
+    """What makes two runs "the same experiment", without the commit, e.g. film-frozen-full-s0-4000steps.
+    The run queue skips a config whose key already has a finished, evaluated run in W&B."""
+    return f"{cfg.cond}-{cfg.adapt}-{cfg.size}-s{cfg.seed}-{int(cfg.train.steps)}steps"
+
+
 def make_run_dir(cfg, commit: str, prefix: str = "") -> Path:
     """<outputs>/<prefix><cond>-<adapt>-s<seed>-<commit7>, e.g. film-frozen-s1-3f9a2c1.
     A timestamp (and a counter) is added if that folder already exists."""
@@ -201,8 +212,10 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
     gpu = torch.cuda.get_device_name(0) if device == "cuda" else None
 
     run_dir = make_run_dir(cfg, git["commit"], run_prefix)
+    for name in ("stats.json", "language.npy"):  # the run folder is self-contained for evaluation
+        shutil.copy2(cache_dir / name, run_dir / name)
     run_info = {
-        "run_id": run_dir.name, "git_commit": git["commit"], "git_dirty": git["dirty"],
+        "run_id": run_dir.name, "key": run_key(cfg), "git_commit": git["commit"], "git_dirty": git["dirty"],
         "cache_dir": str(cache_dir), "debug_data": not cache["training_ok"], "device": device, "gpu": gpu,
         "amp": use_amp, "torch": str(torch.__version__), "on_kaggle": is_kaggle(),
         "trainable_params": n_trainable, "total_params": n_total,
@@ -299,7 +312,7 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
     timed_seconds = timed["data"] + timed["compute"]
     final_val = val_curve[-1]
     metrics = {
-        "run_id": run_dir.name, "cond": cfg.cond, "adapt": cfg.adapt, "seed": int(cfg.seed), "steps": steps,
+        "run_id": run_dir.name, "run_key": run_info["key"], "cond": cfg.cond, "adapt": cfg.adapt, "seed": int(cfg.seed), "steps": steps,
         "train_loss": last_train["loss"], "train_loss_pusht": last_train["loss_pusht"],
         "train_loss_fetch": last_train["loss_fetch"],
         "val_loss": final_val["loss"], "val_loss_pusht": final_val["loss_pusht"],
@@ -308,7 +321,7 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
         "data_ms_per_step": 1000 * timed["data"] / max(1, timed["steps"]),
         "compute_ms_per_step": 1000 * timed["compute"] / max(1, timed["steps"]),
         "data_wait_fraction": timed["data"] / timed_seconds if timed_seconds else float("nan"),
-        "wall_minutes": wall / 60,
+        "wall_minutes": wall / 60, "train_minutes": wall / 60,
         "peak_gpu_mem_gb": torch.cuda.max_memory_allocated() / 1e9 if device == "cuda" else None,
         "peak_gpu_mem_reserved_gb": torch.cuda.max_memory_reserved() / 1e9 if device == "cuda" else None,
         "trainable_params": n_trainable, "total_params": n_total,
@@ -318,10 +331,22 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
     }
     if cfg.train.save_checkpoint:
         torch.save({"model": model.state_dict(), "config": config, "step": steps}, run_dir / "ckpt.pt")
+    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))  # training results are safe now
+    print(f"Training done in {wall / 60:.1f} min.")
+
+    if cfg.eval.enabled:
+        from vla.evaluate import evaluate_run, flat_metrics
+
+        t0 = time.perf_counter()
+        result = evaluate_run(model, run_dir, cfg, device, wb=wb, cache_dir=cache_dir)
+        eval_minutes = (time.perf_counter() - t0) / 60  # includes loading DINOv2 and MiniLM
+        metrics.update(flat_metrics(result))
+        metrics.update({"eval_minutes": eval_minutes, "eval": result})
+    metrics["total_minutes"] = (time.perf_counter() - wall_start) / 60
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     wb.summary.update({k: v for k, v in metrics.items() if not isinstance(v, (dict, list))})
     wb.finish()
-    print(f"Done in {wall / 60:.1f} min. Saved run folder: {run_dir}")
+    print(f"Done in {metrics['total_minutes']:.1f} min. Saved run folder: {run_dir}")
     return run_dir
 
 
@@ -329,10 +354,13 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("overrides", nargs="*", help="cond=film, size=tiny, seed=1, train.steps=1000, ...")
     parser.add_argument("--allow-dirty", action="store_true", help="run with uncommitted changes (debug only)")
+    parser.add_argument("--result-file", help="write {\"run_dir\": ...} here when done (used by scripts/run_queue.py)")
     args = parser.parse_args(argv)
     load_dotenv_if_local()
     check_wandb_key()
-    train(load_config(args.overrides), allow_dirty=args.allow_dirty)
+    run_dir = train(load_config(args.overrides), allow_dirty=args.allow_dirty)
+    if args.result_file:
+        Path(args.result_file).write_text(json.dumps({"run_dir": str(run_dir)}))
 
 
 if __name__ == "__main__":
