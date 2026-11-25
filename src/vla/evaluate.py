@@ -16,9 +16,11 @@ A "policy" here is any object with:
 
 Policies: ExpertPolicy (scripted FetchPush expert, a sanity check), RandomPolicy (should score
 about 0%), VLARolloutPolicy (a trained model; its images go through the same
-preprocess_image() + encode_frames() path as the feature cache) and BaselineRolloutPolicy (a
+preprocess_image() + encode_frames() path as the feature cache), BaselineRolloutPolicy (a
 per-robot baseline; it gets the raw uint8 frames, exactly as in training, and is evaluated on its
-own robot only).
+own robot only) and AdaptedVLARolloutPolicy (Phase 6: a VLA run whose DINOv2 was fine-tuned or
+LoRA-adapted; it gets the raw frames and encodes them with ITS OWN adapted DINOv2, never the frozen
+encoder from the cache).
 
 Command line (Mac examples):
     python -m vla.evaluate --policy expert --robots fetch --episodes 5
@@ -230,6 +232,25 @@ class BaselineRolloutPolicy:
         return to_env_actions(pred, self.normalizer, self.robot)
 
 
+class AdaptedVLARolloutPolicy(BaselineRolloutPolicy):
+    """A trained adaptation run (AdaptedVLAPolicy: full_ft or lora16) driving an env.
+
+    Like the baselines, it hands the model the raw uint8 frames t-1 and t; the model runs
+    preprocess_image() and its own adapted DINOv2, exactly as in training. Plus the instruction's
+    MiniLM vector (from the run's language.npy: MiniLM is frozen, so these are the vectors training saw).
+    """
+
+    def __init__(self, model, normalizer: Normalizer, lang_vectors: dict, device: str, use_amp: bool = False):
+        super().__init__(model, normalizer, device, use_amp)
+        self.lang_vectors = {r: np.asarray(v, dtype=np.float32) for r, v in lang_vectors.items()}
+
+    def make_batch(self, prev_obs, obs, t) -> dict:
+        """The model input for env step t: the same tensors WindowDataset(mode="pixels") gives the VLA."""
+        batch = super().make_batch(prev_obs, obs, t)
+        batch["lang"] = torch.from_numpy(self.lang_vectors[self.robot])[None]
+        return batch
+
+
 # --- one episode -------------------------------------------------------------------
 
 
@@ -393,6 +414,15 @@ def language_vectors(language_fn, language_npy, paraphrase: int) -> tuple[dict, 
     return {r: live[i] for i, r in enumerate(ROBOTS)}, sentences, diff
 
 
+def cached_language_vectors(language_npy, paraphrase: int) -> tuple[dict, dict]:
+    """Paraphrase k's MiniLM vector for each robot, read from a language.npy, and the sentences.
+    Used for adaptation runs, which never load MiniLM (it is frozen in every regime)."""
+    cached = np.load(language_npy).astype(np.float32)
+    order = all_instructions()
+    sentences = {robot: paraphrases(robot, "all")[paraphrase] for robot in ROBOTS}
+    return {r: cached[order.index(sentences[r])] for r in ROBOTS}, sentences
+
+
 def _cache_vision_revision(cache_dir) -> str | None:
     if cache_dir is None:
         return None
@@ -406,7 +436,11 @@ def _cache_vision_revision(cache_dir) -> str | None:
 
 def evaluate_run(model, run_dir, cfg, device: str, wb=None, cache_dir=None, paraphrase: int | None = None,
                  n_episodes: int | None = None, n_videos: int | None = None) -> dict:
-    """Evaluate a trained model with the run's own stats.json and language.npy. Logs to `wb` if given."""
+    """Evaluate a trained model with the run's own stats.json and language.npy. Logs to `wb` if given.
+
+    A model with its own DINOv2 (an adaptation run) is evaluated with THAT encoder: it gets raw frames
+    and the frozen DINOv2/MiniLM are never loaded. Otherwise the frozen encoders are loaded and frames
+    go through encode_frames(), as in the feature cache."""
     run_dir = Path(run_dir)
     e = cfg.eval
     paraphrase = int(e.paraphrase if paraphrase is None else paraphrase)
@@ -414,19 +448,27 @@ def evaluate_run(model, run_dir, cfg, device: str, wb=None, cache_dir=None, para
     n_videos = int(e.n_videos if n_videos is None else n_videos)
     use_amp = bool(cfg.train.amp) and device == "cuda"
 
-    encode, language_fn, info = load_encoders(device)
-    lang, sentences, diff = language_vectors(language_fn, run_dir / "language.npy", paraphrase)
+    normalizer = Normalizer.load(run_dir / "stats.json")
     warnings = []
-    if diff > 1e-3:
-        warnings.append(f"live MiniLM vectors differ from the cache's language.npy by {diff:.2e}")
-    cache_rev, eval_rev = _cache_vision_revision(cache_dir), info.get("vision_revision")
-    if cache_rev and eval_rev and cache_rev != eval_rev:
-        warnings.append(f"DINOv2 weights differ: cache {cache_rev}, evaluation {eval_rev}")
-    for w in warnings:
-        print(f"WARNING: {w}. Evaluation may not see what training saw.")
-
     model.eval()
-    policy = VLARolloutPolicy(model, Normalizer.load(run_dir / "stats.json"), encode, lang, device, use_amp)
+    if getattr(model, "encoder", None) is not None:  # adaptation run: its own DINOv2, cached MiniLM vectors
+        lang, sentences = cached_language_vectors(run_dir / "language.npy", paraphrase)
+        diff = None
+        info = {**model.encoder.info(), "vision_adaptation": model.encoder.mode(),
+                "language": "run's language.npy (MiniLM frozen)"}
+        print(f"Adapted DINOv2 ({model.encoder.mode()}): rollouts use this run's own encoder weights")
+        policy = AdaptedVLARolloutPolicy(model, normalizer, lang, device, use_amp)
+    else:
+        encode, language_fn, info = load_encoders(device)
+        lang, sentences, diff = language_vectors(language_fn, run_dir / "language.npy", paraphrase)
+        if diff > 1e-3:
+            warnings.append(f"live MiniLM vectors differ from the cache's language.npy by {diff:.2e}")
+        cache_rev, eval_rev = _cache_vision_revision(cache_dir), info.get("vision_revision")
+        if cache_rev and eval_rev and cache_rev != eval_rev:
+            warnings.append(f"DINOv2 weights differ: cache {cache_rev}, evaluation {eval_rev}")
+        for w in warnings:
+            print(f"WARNING: {w}. Evaluation may not see what training saw.")
+        policy = VLARolloutPolicy(model, normalizer, encode, lang, device, use_amp)
     tag = "" if paraphrase == 0 else f"_p{paraphrase}"
     print(f"Evaluating {n_episodes} episodes per robot (seeds {e.seed_start}-{e.seed_start + n_episodes - 1}), "
           f"executing {e.exec_steps} of 16 actions per call, instruction paraphrase {paraphrase}")

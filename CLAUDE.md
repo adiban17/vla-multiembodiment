@@ -56,11 +56,11 @@ The user is new to Claude Code, Python packaging and robotics: explain what you 
 
 ## Layout
 ```
-configs/                 YAML configs (base, cond/, adapt/, baseline/)
+configs/                 YAML configs (base, cond/, adapt/ [frozen, frozen_matched, full_ft, lora16], baseline/, size/)
 src/vla/envs/            PushT and FetchPush wrappers
 src/vla/data/            shards.py (.npz format), fetch_expert, collect_fetch, pusht_loader (lerobot env),
                          lerobot_env, pusht_compare, normalize, instructions, dataset, cache_features
-src/vla/models/          encoders (+ preprocess_image), trunk, conditioning, policy, baselines (BC-MLP, ResNet-18)
+src/vla/models/          encoders (+ preprocess_image, LoRA), trunk, conditioning, policy (+ AdaptedVLAPolicy), baselines
 src/vla/utils/           runtime.py (paths, device), tracking.py (git, run info), config, seed
 src/vla/train.py         trains, then evaluates the final model (cfg.eval)
 src/vla/evaluate.py      rollout harness: expert/random/VLA policies, Wilson intervals, videos
@@ -109,3 +109,13 @@ notebooks/kaggle_cells.md   the two Kaggle cells
   robot only (`mean_success` = that robot). run_key `{baseline}-{robot}-{size}-s{seed}-{steps}steps`.
   `scripts/fetch_start_check.py`: 5/50 FetchPush eval seeds (100004, 100010, 100021, 100036, 100049) start with the
   cube already within 5 cm, and they are exactly the random policy's 5 wins (10%), so 10% is the FetchPush floor.
+- Phase 6 (adaptation): built and tested on the Mac. Kaggle jobs `smoke_adapt`, `batch_adaptation --steps N` not run yet.
+  Chosen variant: sep_heads (37.7% mean success in batch_conditioning, by the pre-set rule; lead within seed noise).
+  `adapt=full_ft|lora16` -> `AdaptedVLAPolicy` (own DINOv2 inside the forward pass, reads uint8 `pixels`; lang from
+  language.npy). `adapt=frozen_matched` = frozen + cached, batch 64, same steps (fair control). Config block `encoder`
+  (mode, lr, lora_*). In transformers 5 the DINOv2 query/key/value layers are `q_proj`, `k_proj`, `v_proj`.
+  Trainable: LoRA 442,368 in DINOv2, full_ft 22,056,576; rest of the model 14,826,630. Mixed batches have 96 and 128 px
+  frames, so `collate_mixed_pixels` makes `batch["pixels"]` a list of tensors. Encoder lr is a separate optimizer group.
+  `evaluate_run` uses the run's own adapted encoder when the model has one (never `load_encoders`).
+  Metrics: `peak_gpu_mem_gb_at_200`, `val_seconds`, `encoder_trainable_params`. peft 0.22.0 (Mac also pins
+  accelerate 1.16.0, psutil 7.2.2; Kaggle pins only peft). `kaggle_job.py --steps N` goes to jobs that take `steps`.

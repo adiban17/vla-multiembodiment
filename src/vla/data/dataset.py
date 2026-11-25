@@ -205,3 +205,25 @@ class MixedBatchSampler(torch.utils.data.Sampler):
                     batch.append(self.offsets[r] + int(orders[r][positions[r]]))
                     positions[r] += 1
             yield batch
+
+
+def collate_mixed_pixels(samples: list[dict]) -> dict:
+    """Collate for the VLA in pixels mode (Phase 6 adaptation runs).
+
+    A VLA batch is half PushT (96x96 frames) and half FetchPush (128x128), and frames of different
+    sizes cannot be stacked into one tensor. So every key except "pixels" is collated as usual, and
+    "pixels" becomes a list of stacked tensors, one per run of consecutive same-size samples, in
+    batch order (MixedBatchSampler puts all PushT first, then all FetchPush, so: 2 tensors). The model
+    resizes each to 224 with preprocess_image() and joins them (AdaptedVLAPolicy.encode_pixels).
+    """
+    rest = torch.utils.data.default_collate([{k: v for k, v in s.items() if k != "pixels"} for s in samples])
+    groups, run = [], []
+    for s in samples:
+        if run and s["pixels"].shape != run[-1].shape:
+            groups.append(torch.stack(run))
+            run = []
+        run.append(s["pixels"])
+    if run:
+        groups.append(torch.stack(run))
+    rest["pixels"] = groups
+    return rest

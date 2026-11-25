@@ -15,6 +15,12 @@ learned position (which of the 65 slots: CLS or one of the 8x8 patches) plus a t
 frame (t-1 or t); language, state and queries get a type each. The 16 queries and the robot
 token are learned vectors, so they are already distinct.
 
+AdaptedVLAPolicy (Phase 6) is the same model with its own trainable DINOv2 inside: it reads raw
+uint8 frames (batch["pixels"]), runs the one preprocess_image() at 224 and DINOv2 (CLS + 8x8 pooled
+patches, exactly as the feature cache) in the forward pass, then continues as above. DINOv2 trains
+fully (full_ft) or through LoRA adapters (lora16). MiniLM stays frozen: lang still comes from the
+cache's language.npy.
+
 Loss: L1 over real action dims and real time steps only (spec formula), computed as a mean per
 robot, then the two robot means are averaged. A plain mean over all valid numbers would count
 FetchPush twice as much as PushT (4 action dims vs 2); averaging per robot weights them equally.
@@ -157,11 +163,69 @@ class VLAPolicy(nn.Module):
         return chunk_loss(self, batch)
 
 
+class AdaptedVLAPolicy(VLAPolicy):
+    """VLAPolicy with its own DINOv2 (Phase 6): reads batch["pixels"] instead of cached features.
+
+    encoder_mode "full": every DINOv2 weight trains. "lora": LoRA adapters train (`lora` = r, alpha,
+    dropout, targets); DINOv2's own weights stay frozen.
+
+    batch["pixels"] is (B, 2, H, W, 3) uint8, or a list of such tensors in batch order when a batch
+    mixes image sizes (PushT 96x96 and FetchPush 128x128; see vla.data.dataset.collate_mixed_pixels).
+    """
+
+    def __init__(self, cond: str, encoder_mode: str, lora: dict | None = None, **kwargs):
+        super().__init__(cond, **kwargs)
+        from vla.models.encoders import DinoV2Encoder
+
+        if encoder_mode not in ("full", "lora"):
+            raise ValueError(f"AdaptedVLAPolicy trains DINOv2: encoder_mode must be 'full' or 'lora', got {encoder_mode!r}")
+        if encoder_mode == "lora" and lora is None:
+            raise ValueError("encoder_mode 'lora' needs the LoRA settings (r, alpha, dropout, targets)")
+        self.encoder_mode = encoder_mode
+        self.encoder = DinoV2Encoder(frozen=False, lora=lora if encoder_mode == "lora" else None)
+
+    def encode_pixels(self, pixels) -> torch.Tensor:
+        """uint8 frames -> (B, F, 65, 384) DINOv2 features. Resizing and normalization run in fp32
+        (autocast off, as in the baselines and the feature cache); DINOv2 itself runs under the
+        caller's autocast (fp16 on the GPU), so the memory comparison uses mixed precision."""
+        from vla.models.encoders import preprocess_image
+
+        groups = [pixels] if isinstance(pixels, torch.Tensor) else list(pixels)
+        b = sum(len(g) for g in groups)
+        n_frames = groups[0].shape[1]
+        with torch.autocast(device_type=groups[0].device.type, enabled=False):
+            images = torch.cat([preprocess_image(g.reshape(-1, *g.shape[2:])) for g in groups])  # (B*F, 3, 224, 224)
+        feats = self.encoder(images)                                                       # (B*F, 65, 384)
+        return feats.reshape(b, n_frames, *feats.shape[1:])
+
+    def forward(self, batch: dict) -> torch.Tensor:
+        return super().forward({**batch, "vision": self.encode_pixels(batch["pixels"])})
+
+
+ENCODER_MODES = ("frozen", "full", "lora")
+
+
+def encoder_mode(cfg) -> str:
+    """frozen | full | lora. Configs saved before Phase 6 have no encoder block: frozen."""
+    encoder = cfg.get("encoder") if hasattr(cfg, "get") else None
+    mode = (encoder.get("mode") if encoder is not None else None) or "frozen"
+    if mode not in ENCODER_MODES:
+        raise ValueError(f"unknown encoder.mode {mode!r}; choose from {ENCODER_MODES}")
+    return mode
+
+
 def build_policy(cfg) -> VLAPolicy:
-    """The policy described by a config from vla.utils.config.load_config."""
+    """The policy described by a config from vla.utils.config.load_config: VLAPolicy on cached
+    features (frozen encoders), or AdaptedVLAPolicy with its own trainable DINOv2 (Phase 6)."""
     m = cfg.model
-    return VLAPolicy(cfg.cond, width=m.width, depth=m.depth, heads=m.heads, ffn=m.ffn, dropout=m.dropout,
-                     n_queries=m.n_queries, film_dim=m.film_dim)
+    kwargs = dict(width=m.width, depth=m.depth, heads=m.heads, ffn=m.ffn, dropout=m.dropout,
+                  n_queries=m.n_queries, film_dim=m.film_dim)
+    mode = encoder_mode(cfg)
+    if mode == "frozen":
+        return VLAPolicy(cfg.cond, **kwargs)
+    e = cfg.encoder
+    lora = {"r": e.lora_r, "alpha": e.lora_alpha, "dropout": e.lora_dropout, "targets": list(e.lora_targets)}
+    return AdaptedVLAPolicy(cfg.cond, encoder_mode=mode, lora=lora if mode == "lora" else None, **kwargs)
 
 
 def is_baseline(cfg) -> bool:
@@ -180,3 +244,9 @@ def build_model(cfg) -> nn.Module:
 
 def count_params(model: nn.Module, trainable_only: bool = True) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad or not trainable_only)
+
+
+def encoder_params(model: nn.Module, trainable_only: bool = True) -> int:
+    """Parameters inside the model's own DINOv2 (0 for frozen-feature models and baselines)."""
+    encoder = getattr(model, "encoder", None)
+    return count_params(encoder, trainable_only) if encoder is not None else 0

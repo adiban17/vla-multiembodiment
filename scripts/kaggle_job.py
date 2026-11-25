@@ -1,6 +1,7 @@
 """The one entry point for all work run on Kaggle (and locally on CPU).
 
 Kaggle notebook cell 2 runs:   python scripts/kaggle_job.py --job <name>
+A job with a step count:        python scripts/kaggle_job.py --job batch_adaptation --steps 3000
 List the jobs:                  python scripts/kaggle_job.py --list
 
 To add work, write a function and decorate it with @register("name"). Each job returns
@@ -8,7 +9,9 @@ its run folder. Every job must save its resolved config and git commit (save_run
 """
 
 import argparse
+import inspect
 import json
+import math
 import os
 import platform
 import sys
@@ -17,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # so `import run_queue` works however we are loaded
 
+from vla.utils.config import load_config
 from vla.utils.runtime import get_device, is_kaggle, load_dotenv_if_local, outputs_dir
 from vla.utils.tracking import check_wandb_key, git_commit, save_run_info
 
@@ -511,12 +515,160 @@ def batch_baselines() -> Path:
     return outputs_dir()
 
 
+# --- Phase 6: adaptation regimes ------------------------------------------------
+
+ADAPT_COND = "sep_heads"  # chosen from batch_conditioning by the pre-set rule (best mean success)
+ADAPT_MODES = ("full_ft", "lora16", "frozen_matched")
+SMOKE_ADAPT_STEPS = 200
+RUN_BUDGET_MIN = 40  # train + validation + evaluation per run, leaving a margin under the 45-minute target
+
+
+def adaptation_configs(steps: int) -> list[list[str]]:
+    """The 9 adaptation runs (3 modes x 3 seeds) on sep_heads, seed-major, all with the same step count.
+    frozen_matched has the adaptation runs' batch size (64), so only "unfreezing" differs."""
+    warmup = int(load_config().optim.warmup_steps)
+    if int(steps) <= warmup:
+        raise ValueError(f"--steps {steps} must be larger than the {warmup} warmup steps")
+    return [[f"cond={ADAPT_COND}", f"adapt={a}", f"seed={s}", f"train.steps={int(steps)}"]
+            for s in SEEDS for a in ADAPT_MODES]
+
+
+def max_steps_within(budget_s: float, sec_per_step: float, val_seconds_each: float, val_every: int,
+                     fixed_s: float, granularity: int = 100) -> int:
+    """Largest step count (a multiple of `granularity`) whose run fits in budget_s seconds:
+    steps x sec_per_step + (number of validations) x val_seconds_each + fixed_s (start-up and evaluation).
+    Training validates every val_every steps and at the last step: ceil(steps / val_every) times. 0 if none fits."""
+    best, n = 0, granularity
+    while n <= 1_000_000:
+        if n * sec_per_step + math.ceil(n / val_every) * val_seconds_each + fixed_s > budget_s:
+            break
+        best, n = n, n + granularity
+    return best
+
+
+def _prefetch_dino() -> None:
+    """Download DINOv2-small once, before two runs start at the same time."""
+    from transformers import AutoModel
+
+    from vla.models.encoders import DINO_NAME
+
+    AutoModel.from_pretrained(DINO_NAME)
+    print(f"{DINO_NAME} is in the Hugging Face cache.")
+
+
+@register("smoke_adapt")
+def smoke_adapt() -> Path:
+    """Phase 6: 200 steps of full_ft and lora16 (batch 64, 2 workers); prints s/step, data wait, peak memory, max steps for 40 min."""
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")  # one GPU; must be set before CUDA starts
+    import accelerate
+    import peft
+    import torch
+    import transformers
+
+    from vla.evaluate import ROBOTS
+    from vla.train import run_key, train
+
+    print(f"torch {torch.__version__} | transformers {transformers.__version__} | peft {peft.__version__} | "
+          f"accelerate {accelerate.__version__}")
+    print(f"GPUs visible: {torch.cuda.device_count()} "
+          f"({', '.join(torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())) or 'none, CPU'})")
+    _prefetch_dino()
+    summary_dir, config = _start_data_run("smoke_adapt", {"steps": SMOKE_ADAPT_STEPS, "modes": ["full_ft", "lora16"],
+                                                          "budget_min": RUN_BUDGET_MIN})
+    full = load_config([f"cond={ADAPT_COND}", "adapt=full_ft"])
+    episodes, val_every = int(full.eval.n_episodes), int(full.train.val_every)
+    rows = []
+    for mode in ("full_ft", "lora16"):
+        # 2 data-loader workers, as each run gets in batch_adaptation (2 runs share 4 CPU cores);
+        # one validation (at step 200) and 2 rollouts per robot, to time both
+        cfg = load_config([f"cond={ADAPT_COND}", f"adapt={mode}", f"train.steps={SMOKE_ADAPT_STEPS}",
+                           f"train.val_every={SMOKE_ADAPT_STEPS}", "eval.n_episodes=2", "eval.n_videos=0",
+                           f"data.num_workers={BATCH_WORKERS_PER_RUN}"])
+        print(f"\n=== {run_key(cfg)} ===")
+        t0 = time.perf_counter()
+        run_dir = train(cfg, run_prefix="smoke-")
+        job_seconds = time.perf_counter() - t0  # the whole run: start-up, training, validation, evaluation
+        m = json.loads((run_dir / "metrics.json").read_text())
+        sec_per_step = 1 / m["steps_per_sec"]
+        timed_steps = SMOKE_ADAPT_STEPS - min(10, SMOKE_ADAPT_STEPS // 10)  # train() skips the first 10 in timing
+        val_each = m["val_seconds"] / max(1, m["n_validations"])
+        eval_per_episode = {r: m["eval"][r]["seconds"] / m["eval"][r]["n"] for r in ROBOTS}
+        eval_full = episodes * sum(eval_per_episode.values())
+        # everything that is not a timed step, validation or evaluation: start-up, model loading, warm-up steps
+        startup = job_seconds - timed_steps * sec_per_step - m["val_seconds"] - m["eval_minutes"] * 60
+        fixed = startup + eval_full
+        rows.append({"mode": mode, "run_dir": str(run_dir), "sec_per_step": sec_per_step, "val_each": val_each,
+                     "eval_per_episode": eval_per_episode, "eval_full_s": eval_full, "startup_s": startup,
+                     "max_steps": max_steps_within(RUN_BUDGET_MIN * 60, sec_per_step, val_each, val_every, fixed),
+                     **{k: m[k] for k in ("encoder_trainable_params", "head_trainable_params", "trainable_params",
+                                          "data_ms_per_step", "compute_ms_per_step", "data_wait_fraction",
+                                          "peak_gpu_mem_gb_at_200", "peak_gpu_mem_reserved_gb", "val_loss")}})
+
+    b, workers = int(cfg.data.batch_size), int(cfg.data.num_workers)
+    print(f"\n=== smoke_adapt summary (1 {'GPU' if torch.cuda.is_available() else 'CPU'}, sep_heads, batch {b} = "
+          f"{b // 2} PushT + {b - b // 2} FetchPush, {workers} data-loader workers, "
+          f"fp16 autocast: {bool(cfg.train.amp) and torch.cuda.is_available()}) ===")
+    print(f"{'mode':8s} {'DINOv2 trainable':>17s} {'rest':>11s} {'s/step':>7s} {'data wait':>15s} {'compute':>9s} "
+          f"{'peak GPU @200':>14s} {'reserved':>9s} {'val':>6s} {'eval/ep PushT':>13s} {'Fetch':>6s} {'max steps':>9s}")
+    for r in rows:
+        mem = f"{r['peak_gpu_mem_gb_at_200']:.2f} GB" if r["peak_gpu_mem_gb_at_200"] is not None else "-"
+        reserved = f"{r['peak_gpu_mem_reserved_gb']:.2f} GB" if r["peak_gpu_mem_reserved_gb"] is not None else "-"
+        print(f"{r['mode']:8s} {r['encoder_trainable_params']:>17,d} {r['head_trainable_params']:>11,d} "
+              f"{r['sec_per_step']:>7.3f} {r['data_ms_per_step']:>7.1f} ms {100 * r['data_wait_fraction']:>3.0f}% "
+              f"{r['compute_ms_per_step']:>6.1f} ms {mem:>14s} {reserved:>9s} {r['val_each']:>5.0f}s "
+              f"{r['eval_per_episode']['pusht']:>12.1f}s {r['eval_per_episode']['fetch']:>5.1f}s {r['max_steps']:>9,d}")
+    for r in rows:
+        print(f"{r['mode']}: {r['max_steps']:,} steps x {r['sec_per_step']:.3f} s + validation "
+              f"({r['val_each']:.0f} s every {val_every:,} steps) + evaluation {r['eval_full_s'] / 60:.1f} min "
+              f"({episodes} + {episodes} episodes) + start-up {r['startup_s'] / 60:.1f} min <= {RUN_BUDGET_MIN} min")
+    mems = {r["mode"]: r["peak_gpu_mem_gb_at_200"] for r in rows}
+    if None not in mems.values():
+        print(f"LoRA peak memory vs full fine-tuning: {mems['lora16']:.2f} vs {mems['full_ft']:.2f} GB "
+              f"({100 * (1 - mems['lora16'] / mems['full_ft']):.0f}% lower)")
+    steps = min(r["max_steps"] for r in rows)
+    print("PushT evaluation time per episode is from an untrained model (episodes run the full 300 steps), "
+          "so the estimate errs on the long side. Two runs at once share the 4 CPU cores; if data wait is high, "
+          "leave a margin.")
+    print(f"Use the smaller value for all 9 runs (the same budget for every mode):")
+    print(f"    python scripts/kaggle_job.py --job batch_adaptation --steps {steps}")
+    print(f"batch_adaptation: 9 runs, 2 at a time -> at most about {math.ceil(9 / 2) * RUN_BUDGET_MIN / 60:.1f} h "
+          f"(frozen_matched runs are faster)")
+    (summary_dir / "metrics.json").write_text(json.dumps({"recommended_steps": steps, "rows": rows}, indent=2))
+    return summary_dir
+
+
+@register("batch_adaptation")
+def batch_adaptation(steps: int | None = None) -> Path:
+    """Phase 6: full_ft, lora16, frozen_matched x seeds 0, 1, 2 on sep_heads (--steps N + evaluation), 2 at a time; skips finished runs."""
+    if steps is None:
+        raise ValueError("batch_adaptation needs --steps N (take N from the smoke_adapt summary)")
+    from run_queue import run_queue
+
+    configs = adaptation_configs(steps)
+    _prefetch_dino()
+    rows = run_queue(configs, workers_per_run=BATCH_WORKERS_PER_RUN)
+    failed = [r["key"] or r["label"] for r in rows if r["status"] in ("failed", "timeout")]
+    if failed:
+        raise RuntimeError(f"{len(failed)} runs failed: {failed}. Run a new version to retry only those.")
+    return outputs_dir()
+
+
 # --- command line -----------------------------------------------------------
+
+
+def run_job(name: str, steps: int | None = None):
+    """Run JOBS[name]. --steps goes only to jobs that take a step count (batch_adaptation)."""
+    fn = JOBS[name]
+    takes_steps = "steps" in inspect.signature(fn).parameters
+    if steps is not None and not takes_steps:
+        raise ValueError(f"job {name!r} does not take --steps")
+    return fn(steps=steps) if takes_steps else fn()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--job", choices=sorted(JOBS), help="name of the job to run")
+    parser.add_argument("--steps", type=int, help="training steps per run (batch_adaptation; from smoke_adapt)")
     parser.add_argument("--list", action="store_true", help="list the available jobs")
     args = parser.parse_args()
 
@@ -527,7 +679,7 @@ def main() -> None:
 
     load_dotenv_if_local()
     check_wandb_key()
-    JOBS[args.job]()
+    run_job(args.job, args.steps)
 
 
 if __name__ == "__main__":

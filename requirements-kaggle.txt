@@ -18,6 +18,11 @@ mujoco==3.9.0
 imageio==2.38.2
 imageio-ffmpeg==0.8.1
 
+# LoRA for the DINOv2 adaptation runs (Phase 6). Only peft is pinned: it needs torch>=1.13, any
+# transformers and accelerate>=0.21, which Kaggle already ships, so pip leaves Kaggle's torch and
+# transformers alone. (Pinning accelerate here could pull a different torch.)
+peft==0.22.0
+
 # Builds the separate Python 3.12 env for lerobot (job data_pusht)
 uv==0.10.7
 

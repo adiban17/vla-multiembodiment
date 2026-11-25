@@ -40,6 +40,10 @@ Change `hello` to the job you want. `python scripts/kaggle_job.py --list` shows 
 !python scripts/kaggle_job.py --job hello
 ```
 
+`batch_adaptation` also needs a step count, taken from the `smoke_adapt` summary, for example
+`!python scripts/kaggle_job.py --job batch_adaptation --steps 3000`. It is a command-line argument,
+so changing it never needs a new push.
+
 ## Jobs
 | Job | Accelerator | What it does | Time (estimate) |
 | --- | --- | --- | --- |
@@ -52,6 +56,10 @@ Change `hello` to the job you want. `python scripts/kaggle_job.py --list` shows 
 | `smoke_train` | GPU T4 x2 (uses one) | FiLM policy, 1,000 training steps; prints steps/sec, peak GPU memory, data-wait vs compute time per step, train and val loss | 5-15 min |
 | `eval_sanity` | GPU T4 x2 (uses one) | scripted expert and random policy through the evaluation harness, then one full FiLM seed-0 run (4,000 steps + 50 rollouts per robot); prints the time per run | 45-60 min |
 | `batch_conditioning` | GPU T4 x2 (both) | token, film, sep_heads x seeds 0, 1, 2, two runs at a time (2 data-loader workers each); skips runs already finished in W&B; prints a results table | about 4 h |
+| `smoke_baselines` | GPU T4 x2 (uses one) | 200 steps of BC-MLP and ResNet-18 on each robot + 2 rollouts; prints steps/s, peak memory, time per full run | 10-20 min |
+| `batch_baselines` | GPU T4 x2 (both) | bc_mlp, resnet18 x pusht, fetch x seeds 0, 1, 2, two at a time; skips finished runs | about 4-6 h |
+| `smoke_adapt` | GPU T4 x2 (uses one) | sep_heads with full_ft and with lora16, 200 steps each (batch 64, 2 workers) + 2 rollouts per robot; prints trainable counts, s/step, data wait, peak GPU memory after 200 steps, and the largest `--steps` that keeps train + eval under 40 min | 15-25 min |
+| `batch_adaptation --steps N` | GPU T4 x2 (both) | full_ft, lora16, frozen_matched x seeds 0, 1, 2 on sep_heads, N steps each, two at a time; skips runs finished in W&B (run key includes the mode and N) | about 3-3.5 h |
 
 Run `data_fetch_smoke` before `data_fetch`, and watch its videos in W&B first.
 
@@ -75,6 +83,12 @@ Run `eval_sanity` first and send back its `=== eval_sanity summary ===` block. I
 other 8. If a batch version stops early or a run fails, just run a new version: runs already finished
 in W&B are skipped. Each run writes `metrics.json` with success rates, 95% Wilson intervals and the
 evaluation time, and logs 3 rollout videos per robot to W&B.
+
+**Before `smoke_adapt` and `batch_adaptation`:** **Add Input** → the saved output of your `cache_features`
+notebook (the adaptation runs read its raw `images.npy` frames and `language.npy`). Run `smoke_adapt` first
+and send back its `=== smoke_adapt summary ===` block. Then run `batch_adaptation --steps N` (N from that
+summary) as **Save Version → Save & Run All (Commit)**. `frozen_matched` is the fair frozen control: frozen
+DINOv2 and cached features, but the same batch (64) and steps (N) as the adapted runs.
 
 ## Where results go
 - Each run writes a folder to `/kaggle/working/outputs/<run_id>/` with `config.yaml`, `git.txt`

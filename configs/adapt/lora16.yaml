@@ -1,1 +1,11 @@
-# Encoder adaptation regime: lora16. Filled in Phase 3/6.
+# Encoder adaptation regime: lora16. DINOv2's own weights stay frozen; LoRA adapters (rank 16,
+# alpha 32, dropout 0.05) on query, key and value in all 12 blocks train with lr 1e-4: about 0.44M
+# numbers. B starts at zero, so at step 0 the model equals the frozen one. The rest of the model
+# keeps optim.lr (3e-4). Reads raw uint8 frames (data.mode=pixels), like full_ft.
+encoder:
+  mode: lora
+  lr: 1.0e-4
+data:
+  mode: pixels
+  batch_size: 64
+  val_batch_size: 128

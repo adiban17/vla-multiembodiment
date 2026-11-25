@@ -6,7 +6,7 @@
 #   python -m vla.train baseline=resnet18 robot=fetch seed=1
 
 cond: film        # none | token | film | sep_heads
-adapt: frozen     # frozen (full_ft and lora16 come in Phase 6)
+adapt: frozen     # frozen | frozen_matched | full_ft | lora16 (configs/adapt/)
 baseline: none    # none (the VLA) | bc_mlp | resnet18
 size: full        # full | tiny (Mac CPU tests)
 robot: both       # both (the VLA) | pusht | fetch (a baseline trains on one robot)
@@ -20,6 +20,14 @@ model:
   dropout: 0.1
   n_queries: 16     # 16-step action chunks
   film_dim: 64      # robot embedding size for FiLM
+
+encoder:            # DINOv2 adaptation (Phase 6); configs/adapt/ sets these. MiniLM is always frozen.
+  mode: frozen      # frozen (cached features) | full (all DINOv2 weights train) | lora (LoRA adapters train)
+  lr: null          # DINOv2 learning rate (full 1e-5, LoRA 1e-4); the head keeps optim.lr
+  lora_r: 16        # LoRA rank: each adapted layer learns B (384x16) times A (16x384)
+  lora_alpha: 32    # LoRA scale: the update is multiplied by alpha / r = 2
+  lora_dropout: 0.05
+  lora_targets: [q_proj, k_proj, v_proj]   # query, key, value of all 12 blocks (transformers 5 names)
 
 bc:                 # baselines only (docs/spec.md "Baselines"); configs/baseline/ sets these
   image_size: 64    # frames are resized to this by preprocess_image() inside the model

@@ -1,1 +1,11 @@
-# Encoder adaptation regime: full_ft. Filled in Phase 3/6.
+# Encoder adaptation regime: full_ft. All ~22M DINOv2-small weights train, with a small learning
+# rate (1e-5); the rest of the model keeps optim.lr (3e-4). DINOv2 runs inside every training step,
+# so the model reads raw uint8 frames (data.mode=pixels) instead of cached features.
+# Spec table: batch 64 (half PushT, half FetchPush).
+encoder:
+  mode: full
+  lr: 1.0e-5
+data:
+  mode: pixels
+  batch_size: 64
+  val_batch_size: 128   # validation also runs DINOv2: 128 samples = 256 images per batch

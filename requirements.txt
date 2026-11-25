@@ -24,6 +24,12 @@ mujoco==3.9.0
 imageio==2.38.2
 imageio-ffmpeg==0.8.1
 
+# LoRA for the DINOv2 adaptation runs (Phase 6). peft needs torch>=1.13, any transformers and
+# accelerate>=0.21, so it does not change the torch/transformers pins above.
+peft==0.22.0
+accelerate==1.16.0
+psutil==7.2.2
+
 # Mac only: reads WANDB_API_KEY from the gitignored .env file
 python-dotenv==1.2.4
 

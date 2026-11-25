@@ -1,0 +1,9 @@
+# Encoder adaptation regime: frozen_matched, the fair control for full_ft and lora16 (Phase 6).
+# Frozen DINOv2 and cached features exactly like `frozen`, but with the adaptation runs' batch size
+# (64) and step count (train.steps, set by batch_adaptation --steps N). Without it, a gap between
+# frozen and adapted runs would mix "unfreezing" with "a different training budget".
+encoder:
+  mode: frozen
+data:
+  mode: cached
+  batch_size: 64

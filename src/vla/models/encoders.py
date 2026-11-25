@@ -5,6 +5,8 @@
                         The baselines use it too, with size=64 (BC-MLP) or 224 (ResNet-18).
     DinoV2Encoder       DINOv2-small: one image -> CLS + 16x16 patch vectors (384 each);
                         we average-pool the patches to 8x8, giving 65 x 384 per frame.
+                        Frozen by default; Phase 6 trains it fully (frozen=False) or through
+                        LoRA adapters (lora={...}, PEFT library).
     MiniLMEncoder       all-MiniLM-L6-v2: one sentence -> one 384 vector (mean of token
                         vectors, then scaled to length 1, the same recipe as sentence-transformers).
     encode_frames()     batches of uint8 frames -> DINOv2 features as numpy. The one path used by
@@ -68,19 +70,29 @@ def pool_patches(patches: torch.Tensor, grid: int = POOLED_GRID) -> torch.Tensor
 class DinoV2Encoder(nn.Module):
     """DINOv2-small. forward(pixel_values (N,3,224,224)) -> (N, 65, 384): CLS + 8x8 pooled patches.
 
-    Frozen by default: no gradients, and it stays in eval mode even if .train() is called
-    (Phase 6 un-freezes it for full fine-tuning and LoRA).
+    frozen=True (default): no gradients, and it stays in eval mode even if .train() is called.
+    frozen=False: every weight trains (full fine-tuning, Phase 6).
+    lora={"r", "alpha", "dropout", "targets"}: DINOv2's own weights stay frozen and PEFT adds a
+        trainable low-rank update B @ A next to each target Linear layer (Phase 6). B starts at zero,
+        so the output is exactly the frozen model's until training changes B.
     """
 
-    def __init__(self, name: str = DINO_NAME, frozen: bool = True):
+    def __init__(self, name: str = DINO_NAME, frozen: bool = True, lora: dict | None = None):
         super().__init__()
         from transformers import AutoModel
 
         self.name = name
         self.model = AutoModel.from_pretrained(name).float()
         self.revision = getattr(self.model.config, "_commit_hash", None)  # exact weights used
-        self.frozen = frozen
-        if frozen:
+        self.frozen = frozen and lora is None
+        self.lora = dict(lora) if lora is not None else None
+        if self.lora is not None:
+            from peft import LoraConfig, get_peft_model
+
+            config = LoraConfig(r=int(lora["r"]), lora_alpha=int(lora["alpha"]), lora_dropout=float(lora["dropout"]),
+                                target_modules=list(lora["targets"]), bias="none")
+            self.model = get_peft_model(self.model, config)  # freezes everything except the LoRA weights
+        elif self.frozen:
             self.model.requires_grad_(False)
             self.model.eval()
 
@@ -96,6 +108,9 @@ class DinoV2Encoder(nn.Module):
 
     def info(self) -> dict:
         return {"vision_model": self.name, "vision_revision": self.revision}
+
+    def mode(self) -> str:
+        return "lora" if self.lora is not None else "frozen" if self.frozen else "full"
 
 
 class MiniLMEncoder(nn.Module):

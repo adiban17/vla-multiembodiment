@@ -14,8 +14,12 @@ What one run does:
 4. Every batch is 50% PushT, 50% FetchPush. The loss weights the two robots equally.
    A baseline (baseline=bc_mlp|resnet18, robot=pusht|fetch) trains on its one robot instead,
    reading raw uint8 frames (data.mode=pixels); everything else below is the same.
+   An adaptation run (adapt=full_ft|lora16, Phase 6) also reads raw uint8 frames and runs its own
+   trainable DINOv2 inside every step; adapt=frozen_matched is the frozen control with the same
+   batch size (64) and step count.
 5. AdamW, 500 warmup steps then cosine decay to 0, fp16 autocast + GradScaler on CUDA,
-   gradient clipping at 1.0. Logs to W&B; validation loss every 1,000 steps.
+   gradient clipping at 1.0. DINOv2 gets its own learning rate (encoder.lr). Logs to W&B; validation
+   loss every 1,000 steps; peak GPU memory after 200 steps; seconds per step and data-wait time.
 6. Writes a run folder: config.yaml, git.txt, metrics.json, ckpt.pt, plus copies of the cache's
    stats.json and language.npy (so the run folder alone is enough to evaluate it).
 7. Evaluates the final model with closed-loop rollouts (vla.evaluate; 50 episodes per robot) and
@@ -36,30 +40,47 @@ from torch import nn
 from torch.utils.data import ConcatDataset, DataLoader
 
 from vla.data.cache_features import find_feature_caches, pick_feature_cache, print_feature_caches
-from vla.data.dataset import MixedBatchSampler, WindowDataset, split_episodes
+from vla.data.dataset import MixedBatchSampler, WindowDataset, collate_mixed_pixels, split_episodes
 from vla.data.normalize import Normalizer
-from vla.models.policy import ROBOT_NAMES, build_model, count_params, is_baseline
+from vla.models.policy import ROBOT_NAMES, build_model, count_params, encoder_mode, encoder_params, is_baseline
 from vla.utils.config import load_config, to_dict
 from vla.utils.runtime import get_device, inputs_dir, is_kaggle, load_dotenv_if_local, outputs_dir
 from vla.utils.seed import seed_everything, worker_init_fn
 from vla.utils.tracking import check_wandb_key, dirty_files, git_commit, save_run_info
 
 SPLIT_SEED = 0  # the cache's episode split (vla.data.cache_features.write_stats)
+PEAK_MEMORY_STEP = 200  # spec: read torch.cuda.max_memory_allocated() after 200 steps
 
 
 # --- optimizer and schedule ---------------------------------------------------------
 
 
-def make_optimizer(model: nn.Module, optim_cfg) -> torch.optim.AdamW:
-    """AdamW. Weight decay only on Linear and Conv2d weight matrices (ResNet-18); biases, LayerNorms,
-    BatchNorms, embeddings and the learned query/position vectors are not decayed (standard practice)."""
+def make_optimizer(model: nn.Module, optim_cfg, encoder_lr: float | None = None) -> torch.optim.AdamW:
+    """AdamW. Weight decay only on Linear and Conv2d weight matrices (ResNet-18, DINOv2's patch
+    embedding); biases, LayerNorms, BatchNorms, embeddings and the learned query/position vectors are
+    not decayed (standard practice).
+
+    The model's own trainable DINOv2 (Phase 6: all of it, or only its LoRA weights) gets encoder_lr;
+    everything else gets optim_cfg.lr. Head groups come first, so a model without an encoder gets
+    exactly the 2 groups it always had. The schedule (make_scheduler) scales every group alike."""
     linear_weights = {id(m.weight) for m in model.modules() if isinstance(m, (nn.Linear, nn.Conv2d))}
-    decay, no_decay = [], []
+    encoder = getattr(model, "encoder", None)
+    encoder_ids = {id(p) for p in encoder.parameters()} if encoder is not None else set()
+    decay, no_decay, enc_decay, enc_no_decay = [], [], [], []
     for p in model.parameters():
         if p.requires_grad:
-            (decay if id(p) in linear_weights else no_decay).append(p)
+            in_encoder, decayed = id(p) in encoder_ids, id(p) in linear_weights
+            if in_encoder:
+                (enc_decay if decayed else enc_no_decay).append(p)
+            else:
+                (decay if decayed else no_decay).append(p)
     groups = [{"params": decay, "weight_decay": optim_cfg.weight_decay},
               {"params": no_decay, "weight_decay": 0.0}]
+    if enc_decay or enc_no_decay:
+        if encoder_lr is None:
+            raise ValueError("the model trains DINOv2: set encoder.lr (configs/adapt/)")
+        groups += [g for g in ({"params": enc_decay, "weight_decay": optim_cfg.weight_decay, "lr": float(encoder_lr)},
+                               {"params": enc_no_decay, "weight_decay": 0.0, "lr": float(encoder_lr)}) if g["params"]]
     return torch.optim.AdamW(groups, lr=optim_cfg.lr)
 
 
@@ -125,12 +146,19 @@ def build_datasets(cache_dir: Path, cfg, require_training_images: bool):
     return train_sets, val_sets, {r: split[r] for r in robots}
 
 
+def uses_mixed_pixels(cfg) -> bool:
+    """The VLA reading raw frames (adaptation runs): its batches mix 96x96 and 128x128 frames."""
+    return not is_baseline(cfg) and cfg.data.mode == "pixels"
+
+
 def _loader_kwargs(cfg, device: str, seed: int) -> dict:
     workers = int(cfg.data.num_workers)
     kw = dict(num_workers=workers, pin_memory=device == "cuda", worker_init_fn=worker_init_fn,
               generator=torch.Generator().manual_seed(seed))
     if workers > 0:
         kw["prefetch_factor"] = int(cfg.data.prefetch_factor)
+    if uses_mixed_pixels(cfg):
+        kw["collate_fn"] = collate_mixed_pixels
     return kw
 
 
@@ -142,8 +170,16 @@ def make_train_loader(train_sets, cfg, device: str) -> DataLoader:
                       persistent_workers=int(cfg.data.num_workers) > 0, **_loader_kwargs(cfg, device, cfg.seed))
 
 
+def _to(value, device: str):
+    if isinstance(value, torch.Tensor):
+        return value.to(device, non_blocking=True)
+    if isinstance(value, list) and value and all(isinstance(v, torch.Tensor) for v in value):
+        return [v.to(device, non_blocking=True) for v in value]  # pixels of mixed sizes
+    return value
+
+
 def to_device(batch: dict, device: str) -> dict:
-    return {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+    return {k: _to(v, device) for k, v in batch.items()}
 
 
 @torch.no_grad()
@@ -212,8 +248,11 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
     baseline = is_baseline(cfg)
     if baseline and cfg.data.mode != "pixels":
         raise ValueError(f"baselines read raw frames: data.mode must be 'pixels', got {cfg.data.mode!r}")
-    if not baseline and (cfg.adapt != "frozen" or cfg.data.mode != "cached"):
-        raise NotImplementedError("only frozen encoders with cached features exist so far (Phase 6 adds the rest)")
+    regime = "none" if baseline else encoder_mode(cfg)
+    if not baseline:
+        wanted = "cached" if regime == "frozen" else "pixels"
+        if cfg.data.mode != wanted:
+            raise ValueError(f"encoder.mode {regime} reads data.mode={wanted!r}, got {cfg.data.mode!r}")
     git = git_commit()
     if git["dirty"] and not allow_dirty:
         raise RuntimeError("the code has uncommitted changes:\n" + dirty_files() +
@@ -232,6 +271,9 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
 
     model = build_model(cfg).to(device)
     n_trainable, n_total = count_params(model), count_params(model, trainable_only=False)
+    n_encoder = encoder_params(model)  # the model's own DINOv2 (0 when it reads cached features)
+    n_head = n_trainable - n_encoder
+    encoder_lr = cfg.encoder.lr if n_encoder else None
     gpu = torch.cuda.get_device_name(0) if device == "cuda" else None
 
     run_dir = make_run_dir(cfg, git["commit"], run_prefix)
@@ -242,7 +284,8 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
         "robots": list(robots), "git_commit": git["commit"], "git_dirty": git["dirty"],
         "cache_dir": str(cache_dir), "debug_data": not cache["training_ok"], "device": device, "gpu": gpu,
         "amp": use_amp, "torch": str(torch.__version__), "on_kaggle": is_kaggle(),
-        "trainable_params": n_trainable, "total_params": n_total,
+        "trainable_params": n_trainable, "total_params": n_total, "encoder_mode": regime,
+        "encoder_trainable_params": n_encoder, "head_trainable_params": n_head, "encoder_lr": encoder_lr,
         "train_windows": {r: len(d) for r, d in zip(robots, train_sets)},
         "val_windows": {r: len(d) for r, d in zip(robots, val_sets)},
     }
@@ -254,12 +297,16 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
     wb = wandb.init(project=cfg.wandb.project, name=run_dir.name, group=model_name(cfg),
                     job_type="train", config=config, dir=str(run_dir))
     print(f"Run {run_dir.name} | device {device}{f' ({gpu})' if gpu else ''} | fp16 autocast: {use_amp}")
-    what = f"Baseline {cfg.baseline} on {cfg.robot}" if baseline else f"Variant {cfg.cond}"
+    what = f"Baseline {cfg.baseline} on {cfg.robot}" if baseline else f"Variant {cfg.cond}, adapt {cfg.adapt}"
     mix = f"all {cfg.robot}" if baseline else "half PushT, half FetchPush"
     print(f"{what} | trainable parameters {n_trainable:,} | batch {cfg.data.batch_size} ({mix}) | {steps} steps")
+    if not baseline:
+        lr_text = f"lr {encoder_lr:g}" if encoder_lr is not None else "frozen, cached features"
+        print(f"Trainable: DINOv2 {n_encoder:,} ({regime}, {lr_text}) + rest of the model {n_head:,} "
+              f"(lr {cfg.optim.lr:g})")
     print(f"Train windows {run_info['train_windows']} | val windows {run_info['val_windows']}")
 
-    optimizer = make_optimizer(model, cfg.optim)
+    optimizer = make_optimizer(model, cfg.optim, encoder_lr=encoder_lr)
     scheduler = make_scheduler(optimizer, int(cfg.optim.warmup_steps), steps)
     scaler = torch.amp.GradScaler(device, enabled=use_amp)
     if device == "cuda":
@@ -269,6 +316,7 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
     timed = {"steps": 0, "data": 0.0, "compute": 0.0}
     window = {"steps": 0, "data": 0.0, "compute": 0.0, "loss": 0.0, **dict.fromkeys(robots, 0.0)}
     last_train, val_curve, bad_steps = {}, [], 0
+    mem_step, peak_mem_at_step, val_seconds = min(PEAK_MEMORY_STEP, steps), None, 0.0
     wall_start = time.perf_counter()
 
     model.train()
@@ -290,6 +338,12 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
         if device == "cuda":
             torch.cuda.synchronize()               # so the timer measures the GPU work, not just its launch
         t2 = time.perf_counter()
+
+        if step == mem_step and device == "cuda":  # before any validation, which would add its own peak
+            peak_mem_at_step = torch.cuda.max_memory_allocated() / 1e9
+            print(f"step {step:6d} | peak GPU memory so far {peak_mem_at_step:.2f} GB allocated "
+                  f"({torch.cuda.max_memory_reserved() / 1e9:.2f} GB reserved)")
+            wb.log({"perf/peak_gpu_mem_gb_at_200": peak_mem_at_step}, step=step)
 
         loss = out["loss"].item()
         bad_steps = bad_steps + 1 if not math.isfinite(loss) else 0
@@ -324,7 +378,9 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
             window["steps"] = 0
 
         if step % val_every == 0 or step == steps:
+            t_val = time.perf_counter()
             val = validate(model, val_sets, cfg, device, use_amp)
+            val_seconds += time.perf_counter() - t_val
             val_curve.append({"step": step, **val})
             wb.log({f"val/{k}": v for k, v in val.items()}, step=step)
             per_robot = ", ".join(f"{r} {val[f'loss_{r}']:.4f}" for r in robots)
@@ -347,7 +403,10 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
         "wall_minutes": wall / 60, "train_minutes": wall / 60,
         "peak_gpu_mem_gb": torch.cuda.max_memory_allocated() / 1e9 if device == "cuda" else None,
         "peak_gpu_mem_reserved_gb": torch.cuda.max_memory_reserved() / 1e9 if device == "cuda" else None,
-        "trainable_params": n_trainable, "total_params": n_total,
+        "peak_gpu_mem_gb_at_200": peak_mem_at_step, "peak_mem_step": mem_step,
+        "val_seconds": val_seconds, "n_validations": len(val_curve),
+        "trainable_params": n_trainable, "total_params": n_total, "encoder_mode": regime,
+        "encoder_trainable_params": n_encoder, "head_trainable_params": n_head, "encoder_lr": encoder_lr,
         "batch_size": int(cfg.data.batch_size), "device": device, "gpu": gpu, "train_windows": run_info["train_windows"],
         "debug_data": run_info["debug_data"], "cache_dir": str(cache_dir), "split": split,
         "git_commit": git["commit"],
