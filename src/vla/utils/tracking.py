@@ -1,15 +1,16 @@
 """Experiment tracking: record exactly which code and config produced each run.
 
 Rule: every run saves its resolved config and git commit into its run folder.
-W&B logging helpers will be added here in Phase 3.
 """
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from vla.utils.runtime import REPO_ROOT
+from vla.utils.runtime import REPO_ROOT, is_kaggle
 
 
 def _git(args, repo):
@@ -31,6 +32,14 @@ def git_commit(repo: Path = REPO_ROOT) -> dict:
     return {"commit": commit, "dirty": dirty}
 
 
+def dirty_files(repo: Path = REPO_ROOT) -> str:
+    """`git status --short` output: the files with uncommitted changes."""
+    try:
+        return _git(["status", "--short"], repo).rstrip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "(not a git repo)"
+
+
 def save_run_info(run_dir: Path, config: dict, git: dict | None = None) -> None:
     """Write config.yaml (resolved) and git.txt into run_dir.
 
@@ -46,3 +55,13 @@ def save_run_info(run_dir: Path, config: dict, git: dict | None = None) -> None:
 
     if git["dirty"] and git["commit"] != "unknown":
         (run_dir / "git_diff.patch").write_text(_git(["diff", "HEAD"], REPO_ROOT))
+
+
+def check_wandb_key() -> None:
+    """Fail early with a clear message instead of W&B asking for a key mid-run."""
+    if os.environ.get("WANDB_MODE") in ("offline", "disabled") or os.environ.get("WANDB_API_KEY"):
+        return
+    if is_kaggle():
+        sys.exit("WANDB_API_KEY is not set. Add it in Kaggle (Add-ons > Secrets) and re-run cell 1.")
+    print("No WANDB_API_KEY in .env, so W&B logs offline (files only).")
+    os.environ["WANDB_MODE"] = "offline"

@@ -47,9 +47,9 @@ Change `hello` to the job you want. `python scripts/kaggle_job.py --list` shows 
 | `data_pusht` | None (CPU) is enough | builds a separate Python 3.12 lerobot env, exports lerobot/pusht (206 episodes) to .npz, 3 videos, `pusht_compare.png` | 15-40 min |
 | `data_fetch_smoke` | GPU T4 x2 (EGL rendering) | 5 FetchPush demos with images, 3 videos | 1 min |
 | `data_fetch` | GPU T4 x2 (EGL rendering) | 500 FetchPush demos with images, 3 videos | 15-30 min |
-
 | `cache_features_smoke` | GPU T4 x2 | feature cache of the first 3 episodes per robot; prints the datasets found, stats, sizes and the cached-vs-live check | 2-3 min |
 | `cache_features` | GPU T4 x2 | DINOv2 + MiniLM features (fp16), raw images (uint8), `stats.json`, `size_report.json` for all episodes | 10-30 min |
+| `smoke_train` | GPU T4 x2 (uses one) | FiLM policy, 1,000 training steps; prints steps/sec, peak GPU memory, data-wait vs compute time per step, train and val loss | 5-15 min |
 
 Run `data_fetch_smoke` before `data_fetch`, and watch its videos in W&B first.
 
@@ -59,6 +59,12 @@ Run `data_fetch_smoke` before `data_fetch`, and watch its videos in W&B first.
 and `data_fetch` are attached, it uses the one with more episodes. Run `cache_features_smoke`
 interactively first, then `cache_features` as **Save & Run All (Commit)** (about 4.5 GB of output).
 For long jobs use **Save Version → Save & Run All (Commit)** so the outputs are kept.
+
+**Before `smoke_train`:** **Add Input** → the saved output of your `cache_features` notebook, and
+nothing else is needed. The job searches `/kaggle/input/` for a folder with `stats.json` and `pusht/`,
+`fetch/` feature subfolders, prints what it found, and uses the one with the most frames. It refuses
+caches with debug-only (Mac-rendered) images, and refuses to start if the cloned code has uncommitted
+changes. Send back the `=== smoke_train summary ===` block: it fills in the compute table.
 
 ## Where results go
 - Each run writes a folder to `/kaggle/working/outputs/<run_id>/` with `config.yaml`, `git.txt`

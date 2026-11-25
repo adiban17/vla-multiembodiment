@@ -1,1 +1,43 @@
-# Shared defaults for every run (data, trunk size, optimizer, eval). Filled in Phase 3.
+# Shared defaults for every run (docs/spec.md "Training recipe"). Values are the spec's.
+# Pick a variant with group overrides, change any value with a dotted override, e.g.
+#   python -m vla.train cond=token seed=1 train.steps=5000
+# Groups: cond (configs/cond/), adapt (configs/adapt/), size (configs/size/).
+
+cond: film        # none | token | film | sep_heads
+adapt: frozen     # frozen (full_ft and lora16 come in Phase 6)
+size: full        # full | tiny (Mac CPU tests)
+seed: 0
+
+model:
+  width: 384
+  depth: 8
+  heads: 6
+  ffn: 1536
+  dropout: 0.1
+  n_queries: 16     # 16-step action chunks
+  film_dim: 64      # robot embedding size for FiLM
+
+data:
+  cache_dir: null           # null = search inputs_dir() (/kaggle/input on Kaggle) for the feature cache
+  mode: cached              # cached DINOv2 features (frozen encoders)
+  batch_size: 256           # half PushT, half FetchPush
+  val_batch_size: 512
+  num_workers: 4            # Kaggle gives 4 CPU cores
+  prefetch_factor: 4
+  allow_debug_images: false # true only for Mac tests; always refused on Kaggle
+
+optim:
+  lr: 3.0e-4
+  weight_decay: 0.01
+  warmup_steps: 500
+  grad_clip: 1.0
+
+train:
+  steps: 20000
+  val_every: 1000
+  log_every: 50
+  amp: true                 # fp16 autocast + GradScaler, CUDA only (T4 has no bf16)
+  save_checkpoint: true
+
+wandb:
+  project: vla-multiembodiment

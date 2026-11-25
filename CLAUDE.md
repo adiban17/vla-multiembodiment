@@ -83,3 +83,8 @@ notebooks/kaggle_cells.md   the two Kaggle cells
   Normalization: dims with train range < 0.01 are constant (-> 0); FetchPush actions are identity.
   Mac debug data lives in `runs/debug/pusht` and `runs/debug/fetch_mac_render`
   (`VLA_INPUTS_DIR=runs/debug` runs the cache jobs locally).
+- Phase 3 (model + training loop): built and tested on the Mac. Kaggle job `smoke_train` not run yet.
+  Trainable params: none 14.68M, token 14.68M, film 15.48M, sep_heads 14.83M (`scripts/count_params.py`).
+  Config groups: `cond=`, `adapt=`, `size=full|tiny` (`vla.utils.config.load_config`). Loss = average of the
+  PushT and FetchPush masked-L1 means (equal weight per robot; same rule for val loss).
+  `python -m vla.train size=tiny --allow-dirty` trains locally (Mac debug caches allowed only with size=tiny).

@@ -1,1 +1,4 @@
-# Conditioning variant: film. Filled in Phase 3.
+# Conditioning variant B: FiLM. Robot ID -> 64-d embedding -> gamma and beta for both LayerNorms
+# of all 8 layers, zero-initialized (about +0.8M params).
+model:
+  film_dim: 64

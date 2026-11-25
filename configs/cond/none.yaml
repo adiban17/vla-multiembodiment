@@ -1,1 +1,2 @@
-# Conditioning variant: none. Filled in Phase 3.
+# Conditioning variant: none (optional control). The robot is not given; the trunk must infer it
+# from the image and the instruction. Shared head, 4 outputs, padded dims masked in the loss.

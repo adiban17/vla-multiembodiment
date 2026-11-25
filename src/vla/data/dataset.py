@@ -123,6 +123,10 @@ class WindowDataset(torch.utils.data.Dataset):
             self._array = np.load(self.robot_dir / name, mmap_mode="r")
         return self._array
 
+    def reset_rng(self) -> None:
+        """Restart the instruction choices from the seed (validation uses the same ones every time)."""
+        self._rng = None
+
     def _random(self) -> np.random.Generator:
         if self._rng is None:  # one generator per DataLoader worker, seeded from torch (Phase 3 seeds it)
             info = torch.utils.data.get_worker_info()
@@ -160,3 +164,38 @@ class WindowDataset(torch.utils.data.Dataset):
 
             sample["images"] = preprocess_image(frames)
         return sample
+
+
+class MixedBatchSampler(torch.utils.data.Sampler):
+    """Endless batches of indices into ConcatDataset([robot 0 data, robot 1 data, ...]).
+
+    Each batch takes a fixed share from every robot (spec: 50% PushT, 50% FetchPush), so neither
+    robot dominates even though their datasets differ in size. Each robot's indices are shuffled
+    and used once per pass, then reshuffled. The same seed gives the same batches.
+    """
+
+    def __init__(self, sizes, batch_size: int, fractions=None, seed: int = 0):
+        self.sizes = [int(n) for n in sizes]
+        if min(self.sizes) <= 0:
+            raise ValueError(f"every robot needs at least one sample, got sizes {self.sizes}")
+        fractions = fractions or [1 / len(self.sizes)] * len(self.sizes)
+        counts = [int(round(batch_size * f)) for f in fractions[:-1]]
+        self.counts = counts + [batch_size - sum(counts)]
+        if min(self.counts) <= 0:
+            raise ValueError(f"batch {batch_size} split as {self.counts}: every robot needs a share")
+        self.offsets = np.concatenate([[0], np.cumsum(self.sizes)[:-1]]).tolist()
+        self.seed = seed
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed)
+        orders = [rng.permutation(n) for n in self.sizes]
+        positions = [0] * len(self.sizes)
+        while True:
+            batch = []
+            for r, (n, k) in enumerate(zip(self.sizes, self.counts)):
+                for _ in range(k):
+                    if positions[r] == n:
+                        orders[r], positions[r] = rng.permutation(n), 0
+                    batch.append(self.offsets[r] + int(orders[r][positions[r]]))
+                    positions[r] += 1
+            yield batch

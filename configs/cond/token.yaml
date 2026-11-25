@@ -1,1 +1,1 @@
-# Conditioning variant: token. Filled in Phase 3.
+# Conditioning variant A: one learned 384-number token per robot, added to the sequence (+768 params).

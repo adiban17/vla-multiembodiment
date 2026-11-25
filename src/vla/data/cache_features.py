@@ -236,3 +236,56 @@ def verify_cache(robot_dir, data_dir, encode_fn, n_check: int = 32, seed: int = 
         "images_equal": images_equal,
         "ok": bool(within.all() and images_equal),
     }
+
+
+# --- finding a cache for training ---------------------------------------------------
+
+
+ROBOTS = ("pusht", "fetch")
+
+
+def find_feature_caches(root) -> list[dict]:
+    """Every feature-cache run folder under root: it has stats.json and language.npy, and
+    pusht/ and fetch/ subfolders whose meta.json says kind "features". Kaggle folder names
+    contain a commit and timestamp, so we search instead of hardcoding them."""
+    found = []
+    for stats_path in sorted(Path(root).rglob("stats.json")):
+        folder = stats_path.parent
+        if not (folder / "language.npy").is_file():
+            continue
+        metas = {}
+        for robot in ROBOTS:
+            if (folder / robot / "meta.json").is_file():
+                meta = read_meta(folder / robot)
+                if meta.get("kind") == "features":
+                    metas[robot] = meta
+        if len(metas) != len(ROBOTS):
+            continue
+        found.append({
+            "path": folder,
+            "metas": metas,
+            "n_frames": sum(int(m.get("n_frames", 0)) for m in metas.values()),
+            "training_ok": all(bool(m.get("images_for_training")) for m in metas.values()),
+        })
+    return found
+
+
+def print_feature_caches(found: list[dict]) -> None:
+    if not found:
+        print("  (none)")
+    for c in found:
+        robots = "  ".join(f"{r} {c['metas'][r].get('n_frames', '?')} frames "
+                           f"(training images: {bool(c['metas'][r].get('images_for_training'))})" for r in ROBOTS)
+        print(f"  {c['path']}\n      {robots}")
+
+
+def pick_feature_cache(found: list[dict], require_training_images: bool) -> dict:
+    """The cache with the most frames (so the full cache beats the smoke cache). With
+    require_training_images, caches holding debug-only (Mac-rendered) images are refused."""
+    if not found:
+        raise RuntimeError("no feature cache found. Attach the cache_features notebook output with Add Input.")
+    options = [c for c in found if c["training_ok"]] if require_training_images else list(found)
+    if not options:
+        raise RuntimeError("every feature cache found holds debug-only images (Mac renders), which must not be "
+                           "used for training. Attach the cache_features output built on Kaggle.")
+    return max(options, key=lambda c: c["n_frames"])

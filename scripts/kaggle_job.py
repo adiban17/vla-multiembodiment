@@ -11,12 +11,11 @@ import argparse
 import json
 import os
 import platform
-import sys
 import time
 from pathlib import Path
 
 from vla.utils.runtime import get_device, is_kaggle, load_dotenv_if_local, outputs_dir
-from vla.utils.tracking import git_commit, save_run_info
+from vla.utils.tracking import check_wandb_key, git_commit, save_run_info
 
 WANDB_PROJECT = "vla-multiembodiment"
 
@@ -286,17 +285,42 @@ def cache_features() -> Path:
     return _cache_features("cache_features", max_episodes=None)
 
 
+# --- Phase 3: training --------------------------------------------------------
+
+
+@register("smoke_train")
+def smoke_train() -> Path:
+    """Phase 3: FiLM for 1,000 steps on one GPU; prints steps/sec, peak GPU memory, data vs compute time."""
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")  # one GPU; must be set before CUDA starts
+    import torch
+
+    from vla.train import train
+    from vla.utils.config import load_config
+
+    print(f"GPUs visible: {torch.cuda.device_count()} "
+          f"({', '.join(torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())) or 'none, CPU'})")
+    cfg = load_config(["cond=film", "adapt=frozen", "train.steps=1000"])
+    run_dir = train(cfg, run_prefix="smoke-")
+
+    m = json.loads((run_dir / "metrics.json").read_text())
+    wait = 100 * m["data_wait_fraction"]
+    print("\n=== smoke_train summary ===")
+    print(f"GPU:              {m['gpu'] or 'none (CPU)'}")
+    print(f"Batch size:       {m['batch_size']} (half PushT, half FetchPush)")
+    print(f"Trainable params: {m['trainable_params']:,}")
+    print(f"Steps per second: {m['steps_per_sec']:.2f}  ->  20k steps take about "
+          f"{20000 / m['steps_per_sec'] / 60:.0f} min (training only, no evaluation)")
+    print(f"Per step:         data wait {m['data_ms_per_step']:.1f} ms, compute {m['compute_ms_per_step']:.1f} ms")
+    print(f"GPU waits for data {wait:.0f}% of the time"
+          + ("  -> data loading is the bottleneck" if wait > 20 else "  -> fine, the GPU is kept busy"))
+    if m["peak_gpu_mem_gb"] is not None:
+        print(f"Peak GPU memory:  {m['peak_gpu_mem_gb']:.2f} GB allocated, {m['peak_gpu_mem_reserved_gb']:.2f} GB reserved")
+    print(f"Loss:             train {m['train_loss']:.4f} | val {m['val_loss']:.4f} "
+          f"(pusht {m['val_loss_pusht']:.4f}, fetch {m['val_loss_fetch']:.4f})")
+    return run_dir
+
+
 # --- command line -----------------------------------------------------------
-
-
-def check_wandb_key() -> None:
-    """Fail early with a clear message instead of W&B asking for a key mid-run."""
-    if os.environ.get("WANDB_MODE") in ("offline", "disabled") or os.environ.get("WANDB_API_KEY"):
-        return
-    if is_kaggle():
-        sys.exit("WANDB_API_KEY is not set. Add it in Kaggle (Add-ons > Secrets) and re-run cell 1.")
-    print("No WANDB_API_KEY in .env, so W&B logs offline (files only).")
-    os.environ["WANDB_MODE"] = "offline"
 
 
 def main() -> None:

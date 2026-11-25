@@ -1,1 +1,1 @@
-# Conditioning variant: sep_heads. Filled in Phase 3.
+# Conditioning variant C: separate output heads, one MLP per robot (2 or 4 outputs, about +0.15M params).

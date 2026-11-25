@@ -1,0 +1,22 @@
+# Tiny model and run for Mac CPU tests only (never for results).
+model:
+  width: 64
+  depth: 2
+  heads: 2
+  ffn: 128
+  dropout: 0.0
+  film_dim: 16
+data:
+  batch_size: 8
+  val_batch_size: 16
+  num_workers: 0
+  allow_debug_images: true   # Mac debug caches are allowed here; still refused on Kaggle
+optim:
+  lr: 3.0e-3                 # a tiny model on one batch can take a bigger step
+  warmup_steps: 10           # short warmup, so tiny runs and overfit tests are not stuck warming up
+train:
+  steps: 300
+  val_every: 100
+  log_every: 10
+  amp: false
+  save_checkpoint: true

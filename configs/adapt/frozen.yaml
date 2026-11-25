@@ -1,1 +1,4 @@
-# Encoder adaptation regime: frozen. Filled in Phase 3/6.
+# Encoder adaptation regime: frozen. DINOv2 and MiniLM are not trained; training reads the
+# cached features. (full_ft and lora16 are filled in Phase 6.)
+data:
+  mode: cached
