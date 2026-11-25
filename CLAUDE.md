@@ -60,12 +60,13 @@ configs/                 YAML configs (base, cond/, adapt/, baseline/)
 src/vla/envs/            PushT and FetchPush wrappers
 src/vla/data/            shards.py (.npz format), fetch_expert, collect_fetch, pusht_loader (lerobot env),
                          lerobot_env, pusht_compare, normalize, instructions, dataset, cache_features
-src/vla/models/          encoders (+ preprocess_image), trunk, conditioning, policy, baselines
+src/vla/models/          encoders (+ preprocess_image), trunk, conditioning, policy, baselines (BC-MLP, ResNet-18)
 src/vla/utils/           runtime.py (paths, device), tracking.py (git, run info), config, seed
 src/vla/train.py         trains, then evaluates the final model (cfg.eval)
 src/vla/evaluate.py      rollout harness: expert/random/VLA policies, Wilson intervals, videos
 scripts/kaggle_job.py    registry of named jobs run on Kaggle (and locally on CPU)
 scripts/run_queue.py     runs configs two at a time (one per GPU), skips runs finished in W&B
+scripts/fetch_start_check.py   counts FetchPush eval starts already solved (CPU, no policy)
 tests/                   checks, written before each phase's code
 notebooks/kaggle_cells.md   the two Kaggle cells
 ```
@@ -100,3 +101,11 @@ notebooks/kaggle_cells.md   the two Kaggle cells
   `{cond}-{adapt}-{size}-s{seed}-{steps}steps` (no commit) is what the queue uses to skip finished W&B runs.
   The queue gives each run 2 data-loader workers when 2 run at once (`data.num_workers` affects which instruction
   each sample gets, so it is part of the config). `python -m vla.evaluate --policy expert|random|<run_dir>`.
+- Phase 5 (baselines): built and tested on the Mac. Kaggle jobs `smoke_baselines`, `batch_baselines` not run yet.
+  `baseline=bc_mlp|resnet18 robot=pusht|fetch` (config group `baseline`, key `robot`; the VLA keeps `robot=both`).
+  Baselines read uint8 frames (`data.mode=pixels`) and call `preprocess_image(size=64|224)` inside the model
+  (antialias only when shrinking, so the 224 DINOv2 path is unchanged). Same 3-layer MLP head (512) for both:
+  BC-MLP 12,883,008 params, ResNet-18 12,000,896. Batch 128, lr 1e-3 / 1e-4, 4,000 steps, evaluated on their own
+  robot only (`mean_success` = that robot). run_key `{baseline}-{robot}-{size}-s{seed}-{steps}steps`.
+  `scripts/fetch_start_check.py`: 5/50 FetchPush eval seeds (100004, 100010, 100021, 100036, 100049) start with the
+  cube already within 5 cm, and they are exactly the random policy's 5 wins (10%), so 10% is the FetchPush floor.

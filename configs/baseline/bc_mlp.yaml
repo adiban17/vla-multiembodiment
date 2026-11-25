@@ -1,1 +1,10 @@
-# Baseline: bc_mlp. Filled in Phase 5.
+# Baseline: BC-MLP from scratch (docs/spec.md "Baselines"). No pretrained vision at all:
+# frames t-1 and t are resized to 64x64, flattened with the state, into a 3-layer MLP (512 wide).
+# Trains on one robot: add robot=pusht or robot=fetch. Spec table: batch 128, lr 1e-3.
+data:
+  mode: pixels        # raw uint8 frames from the cache's images.npy
+  batch_size: 128     # all from one robot
+optim:
+  lr: 1.0e-3
+bc:
+  image_size: 64

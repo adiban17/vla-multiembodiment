@@ -1,1 +1,12 @@
-# Baseline: resnet18. Filled in Phase 5.
+# Baseline: ResNet-18 BC (docs/spec.md "Baselines"). ImageNet-pretrained ResNet-18, fine-tuned
+# end to end; one 512-number feature per frame (t-1, t) + state, into the same MLP head as BC-MLP.
+# Frames are resized to 224x224 (ResNet's ImageNet size). Trains on one robot: add robot=pusht or
+# robot=fetch. Spec table: batch 128, lr 1e-4.
+data:
+  mode: pixels
+  batch_size: 128
+optim:
+  lr: 1.0e-4
+bc:
+  image_size: 224
+  pretrained: true

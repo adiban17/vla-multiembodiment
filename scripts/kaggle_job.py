@@ -425,6 +425,92 @@ def batch_conditioning() -> Path:
     return outputs_dir()
 
 
+# --- Phase 5: baselines ------------------------------------------------------
+
+BASELINES = ("bc_mlp", "resnet18")
+BASELINE_ROBOTS = ("pusht", "fetch")
+SMOKE_BASELINE_STEPS = 200
+
+
+def baseline_configs() -> list[list[str]]:
+    """The 12 baseline runs (2 models x 2 robots x 3 seeds), seed-major like conditioning_configs."""
+    return [[f"baseline={b}", f"robot={r}", f"seed={s}"] for s in SEEDS for b in BASELINES for r in BASELINE_ROBOTS]
+
+
+def _prefetch_resnet_weights() -> None:
+    """Download the ImageNet ResNet-18 weights once, before two runs start at the same time
+    (otherwise both would write the same file in the torch cache at once)."""
+    from torchvision.models import ResNet18_Weights, resnet18
+
+    resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+    print("ResNet-18 ImageNet weights are in the torch cache.")
+
+
+@register("smoke_baselines")
+def smoke_baselines() -> Path:
+    """Phase 5: 200 steps of each baseline on each robot + 2 rollouts; prints steps/s and peak GPU memory."""
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")  # one GPU; must be set before CUDA starts
+    import torch
+
+    from vla.train import run_key, train
+    from vla.utils.config import load_config
+
+    print(f"GPUs visible: {torch.cuda.device_count()} "
+          f"({', '.join(torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())) or 'none, CPU'})")
+    _prefetch_resnet_weights()
+    rows = []
+    for name in BASELINES:
+        for robot in BASELINE_ROBOTS:
+            # 2 data-loader workers, as each run gets in batch_baselines (2 runs share 4 CPU cores)
+            cfg = load_config([f"baseline={name}", f"robot={robot}", f"train.steps={SMOKE_BASELINE_STEPS}",
+                               "train.val_every=100", "eval.n_episodes=2", "eval.n_videos=0",
+                               f"data.num_workers={BATCH_WORKERS_PER_RUN}"])
+            print(f"\n=== {run_key(cfg)} ===")
+            run_dir = train(cfg, run_prefix="smoke-")
+            m = json.loads((run_dir / "metrics.json").read_text())
+            rows.append({"name": name, "robot": robot, "run_dir": str(run_dir), **m})
+
+    full = load_config([f"baseline={BASELINES[0]}", f"robot={BASELINE_ROBOTS[0]}"])
+    steps, episodes = int(full.train.steps), int(full.eval.n_episodes)
+    print("\n=== smoke_baselines summary (1 T4, batch 128, 2 data-loader workers) ===")
+    print(f"{'model':9s} {'robot':6s} {'params':>11s} {'steps/s':>8s} {'data wait':>9s} {'compute':>9s} "
+          f"{'peak GPU':>14s} {'val L1':>7s} {'success':>8s} {'eval/ep':>8s} {'est. full run':>14s}")
+    total = 0.0
+    for r in rows:
+        success = r["eval"][r["robot"]]  # the per-robot result: successes, n, ...
+        eval_per_episode = r["eval_minutes"] / success["n"]
+        # eval_minutes of the smoke run includes start-up, so this estimate errs on the long side
+        est = steps / r["steps_per_sec"] / 60 + episodes * eval_per_episode
+        total += est
+        mem = (f"{r['peak_gpu_mem_gb']:.2f}/{r['peak_gpu_mem_reserved_gb']:.2f} GB"
+               if r["peak_gpu_mem_gb"] is not None else "-")
+        print(f"{r['name']:9s} {r['robot']:6s} {r['trainable_params']:>11,d} {r['steps_per_sec']:>8.2f} "
+              f"{100 * r['data_wait_fraction']:>8.0f}% {r['compute_ms_per_step']:>7.1f}ms {mem:>14s} "
+              f"{r['val_loss']:>7.4f} {success['successes']:>4d}/{success['n']:<3d} {60 * eval_per_episode:>7.1f}s "
+              f"{est:>10.1f} min")
+    print(f"Peak GPU memory is allocated/reserved. Full run = {steps:,} steps + {episodes} episodes.")
+    print(f"batch_baselines: {len(baseline_configs())} runs = 3 seeds of the 4 rows above, 2 at a time -> about "
+          f"{3 * total / 2 / 60:.1f} h if two parallel runs do not slow each other down")
+    slow = [r for r in rows if r["data_wait_fraction"] > 0.2]
+    for r in slow:
+        print(f"NOTE: {r['name']} on {r['robot']} waits for data {100 * r['data_wait_fraction']:.0f}% of the time "
+              f"(data loading is its bottleneck).")
+    return outputs_dir()
+
+
+@register("batch_baselines")
+def batch_baselines() -> Path:
+    """Phase 5: bc_mlp, resnet18 x pusht, fetch x seeds 0, 1, 2 (4,000 steps + evaluation), 2 at a time; skips finished runs."""
+    from run_queue import run_queue
+
+    _prefetch_resnet_weights()
+    rows = run_queue(baseline_configs(), workers_per_run=BATCH_WORKERS_PER_RUN)
+    failed = [r["key"] or r["label"] for r in rows if r["status"] in ("failed", "timeout")]
+    if failed:
+        raise RuntimeError(f"{len(failed)} runs failed: {failed}. Run a new version to retry only those.")
+    return outputs_dir()
+
+
 # --- command line -----------------------------------------------------------
 
 

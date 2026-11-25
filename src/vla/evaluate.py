@@ -15,13 +15,16 @@ A "policy" here is any object with:
                             there is none, so prev_obs IS obs, exactly as in training).
 
 Policies: ExpertPolicy (scripted FetchPush expert, a sanity check), RandomPolicy (should score
-about 0%) and VLARolloutPolicy (a trained model; its images go through the same
-preprocess_image() + encode_frames() path as the feature cache).
+about 0%), VLARolloutPolicy (a trained model; its images go through the same
+preprocess_image() + encode_frames() path as the feature cache) and BaselineRolloutPolicy (a
+per-robot baseline; it gets the raw uint8 frames, exactly as in training, and is evaluated on its
+own robot only).
 
 Command line (Mac examples):
     python -m vla.evaluate --policy expert --robots fetch --episodes 5
     python -m vla.evaluate --policy random --robots pusht --episodes 2
     python -m vla.evaluate --policy outputs/<run_id> --paraphrase 8      # held-out instruction
+    python -m vla.evaluate --policy outputs/<baseline run_id>            # its own robot only
 """
 
 import argparse
@@ -103,6 +106,20 @@ class RandomPolicy:
         return np.concatenate([moves, np.zeros((self.chunk, 1))], axis=1).astype(np.float32)
 
 
+def to_env_actions(pred: torch.Tensor, normalizer: Normalizer, robot: str) -> np.ndarray:
+    """(16, 4) model output in normalized units -> (16, action_dim) real actions, clipped to the env's range."""
+    dims = ACTION_DIMS[robot]
+    actions = normalizer.unnormalize(pred.float().cpu().numpy()[:, :dims], robot, "action")
+    lo, hi = ACTION_BOUNDS[robot]
+    return np.clip(actions, lo, hi).astype(np.float32)
+
+
+def state_input(normalizer: Normalizer, obs: dict, robot: str) -> np.ndarray:
+    """The env's raw state -> the normalized, padded (8,) state that training saw."""
+    state = normalizer.normalize(np.asarray(obs["state"], dtype=np.float32), robot, "state")
+    return np.ascontiguousarray(_pad_last(state, STATE_DIM))
+
+
 class VLARolloutPolicy:
     """A trained VLA policy driving an env.
 
@@ -160,11 +177,10 @@ class VLARolloutPolicy:
         robot = self.robot
         steps = [t - 1 if prev_obs is not obs else t, t]
         vision = np.stack(self._frame_features(steps, [prev_obs["image"], obs["image"]]))
-        state = _pad_last(self.normalizer.normalize(np.asarray(obs["state"], dtype=np.float32), robot, "state"),
-                          STATE_DIM)
+        state = state_input(self.normalizer, obs, robot)
         return {
             "vision": torch.from_numpy(vision)[None],
-            "state": torch.from_numpy(np.ascontiguousarray(state))[None],
+            "state": torch.from_numpy(state)[None],
             "lang": torch.from_numpy(self.lang_vectors[robot])[None],
             "embodiment_id": torch.tensor([EMBODIMENT_ID[robot]], dtype=torch.int64),
         }
@@ -174,10 +190,44 @@ class VLARolloutPolicy:
         with torch.inference_mode(), torch.autocast(device_type=self.device, dtype=torch.float16,
                                                     enabled=self.use_amp):
             pred = self.model(batch)[0]  # (16, 4), normalized units
-        dims = ACTION_DIMS[self.robot]
-        actions = self.normalizer.unnormalize(pred.float().cpu().numpy()[:, :dims], self.robot, "action")
-        lo, hi = ACTION_BOUNDS[self.robot]
-        return np.clip(actions, lo, hi).astype(np.float32)
+        return to_env_actions(pred, self.normalizer, self.robot)
+
+
+class BaselineRolloutPolicy:
+    """A trained per-robot baseline (BC-MLP or ResNet-18) driving an env.
+
+    It gets the raw uint8 frames t-1 and t, the same "pixels" WindowDataset gave in training; the
+    model itself runs preprocess_image(). State normalization and action unnormalization are the
+    VLA's (the run's own stats.json).
+    """
+
+    needs_images = True
+
+    def __init__(self, model, normalizer: Normalizer, device: str, use_amp: bool = False):
+        self.model = model
+        self.normalizer = normalizer
+        self.device = device
+        self.use_amp = use_amp
+        self.robot = None
+
+    def reset(self, robot, seed):
+        self.robot = robot
+
+    def make_batch(self, prev_obs, obs, t) -> dict:
+        """The model input for env step t: the same tensors WindowDataset(mode="pixels") gives."""
+        pixels = np.stack([np.asarray(prev_obs["image"], dtype=np.uint8), np.asarray(obs["image"], dtype=np.uint8)])
+        return {
+            "pixels": torch.from_numpy(pixels)[None],
+            "state": torch.from_numpy(state_input(self.normalizer, obs, self.robot))[None],
+            "embodiment_id": torch.tensor([EMBODIMENT_ID[self.robot]], dtype=torch.int64),
+        }
+
+    def act(self, prev_obs, obs, t):
+        batch = {k: v.to(self.device) for k, v in self.make_batch(prev_obs, obs, t).items()}
+        with torch.inference_mode(), torch.autocast(device_type=self.device, dtype=torch.float16,
+                                                    enabled=self.use_amp):
+            pred = self.model(batch)[0]
+        return to_env_actions(pred, self.normalizer, self.robot)
 
 
 # --- one episode -------------------------------------------------------------------
@@ -386,17 +436,44 @@ def evaluate_run(model, run_dir, cfg, device: str, wb=None, cache_dir=None, para
                    "language_max_abs_diff": diff, "encoders": info, "warnings": warnings,
                    "exec_steps": int(e.exec_steps), "seed_start": int(e.seed_start)})
     print_summary(result, f"Evaluation of {run_dir.name}")
+    log_eval(wb, result, tag)
+    return result
 
-    if wb is not None:
-        import wandb
 
-        flat = flat_metrics(result)
-        log = {f"eval{tag}/{k}": v for k, v in flat.items()}
-        for robot in ROBOTS:
-            for path in result[robot]["videos"]:
-                log[f"video{tag}/{Path(path).stem}"] = wandb.Video(path, format="mp4")
-        wb.log(log)
-        wb.summary.update({f"eval{tag}/{k}": v for k, v in flat.items()})
+def log_eval(wb, result: dict, tag: str = "") -> None:
+    """Headline numbers and rollout videos to W&B (does nothing without a run)."""
+    if wb is None:
+        return
+    import wandb
+
+    flat = flat_metrics(result)
+    log = {f"eval{tag}/{k}": v for k, v in flat.items()}
+    for robot in ROBOTS:
+        for path in result.get(robot, {}).get("videos", []):
+            log[f"video{tag}/{Path(path).stem}"] = wandb.Video(path, format="mp4")
+    wb.log(log)
+    wb.summary.update({f"eval{tag}/{k}": v for k, v in flat.items()})
+
+
+def evaluate_baseline_run(model, run_dir, cfg, device: str, wb=None, n_episodes: int | None = None,
+                          n_videos: int | None = None) -> dict:
+    """Evaluate a trained baseline on its own robot (cfg.robot), same seeds and chunking as the VLA.
+    "mean_success" is then that robot's success rate."""
+    run_dir = Path(run_dir)
+    e = cfg.eval
+    n_episodes = int(e.n_episodes if n_episodes is None else n_episodes)
+    n_videos = int(e.n_videos if n_videos is None else n_videos)
+    use_amp = bool(cfg.train.amp) and device == "cuda"
+    model.eval()
+    policy = BaselineRolloutPolicy(model, Normalizer.load(run_dir / "stats.json"), device, use_amp)
+    print(f"Evaluating baseline {cfg.baseline} on {cfg.robot}: {n_episodes} episodes "
+          f"(seeds {e.seed_start}-{e.seed_start + n_episodes - 1}), executing {e.exec_steps} of 16 actions per call")
+    result = evaluate_policy(policy, (cfg.robot,), n_episodes, int(e.seed_start), int(e.exec_steps), n_videos,
+                             run_dir / "videos")
+    result.update({"baseline": cfg.baseline, "robot": cfg.robot, "exec_steps": int(e.exec_steps),
+                   "seed_start": int(e.seed_start)})
+    print_summary(result, f"Evaluation of {run_dir.name}")
+    log_eval(wb, result)
     return result
 
 
@@ -404,11 +481,13 @@ def load_run(run_dir, device: str):
     """(model, cfg) from a run folder's ckpt.pt."""
     from omegaconf import OmegaConf
 
-    from vla.models.policy import build_policy
+    from vla.models.policy import build_model, is_baseline
 
     ckpt = torch.load(Path(run_dir) / "ckpt.pt", map_location=device, weights_only=False)
     cfg = OmegaConf.create(ckpt["config"])
-    model = build_policy(cfg).to(device)
+    if is_baseline(cfg):
+        cfg.bc.pretrained = False  # the checkpoint holds the trained weights; no ImageNet download
+    model = build_model(cfg).to(device)
     model.load_state_dict(ckpt["model"])
     return model.eval(), cfg
 
@@ -432,9 +511,17 @@ def main(argv=None) -> None:
         print_summary(result, f"{args.policy} policy")
         return
 
+    from vla.models.policy import is_baseline
+
     device = get_device()
     model, cfg = load_run(args.policy, device)
     cfg.eval.exec_steps = args.exec_steps
+    if is_baseline(cfg):
+        result = evaluate_baseline_run(model, args.policy, cfg, device, n_episodes=args.episodes, n_videos=args.videos)
+        out = Path(args.policy) / "eval.json"
+        out.write_text(json.dumps({**flat_metrics(result), "eval": result}, indent=2))
+        print(f"Saved {out}")
+        return
     result = evaluate_run(model, args.policy, cfg, device, cache_dir=cfg.run.cache_dir, paraphrase=args.paraphrase,
                           n_episodes=args.episodes, n_videos=args.videos)
     out = Path(args.policy) / f"eval_p{args.paraphrase}.json"

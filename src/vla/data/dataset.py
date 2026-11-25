@@ -4,6 +4,8 @@ One sample = one moment t of one demo episode:
 
     vision          2 x 65 x 384   cached DINOv2 features of frames t-1 and t   (mode="cached")
     images          2 x 3 x 224 x 224   preprocessed frames t-1 and t           (mode="raw")
+    pixels          2 x H x W x 3  uint8 frames t-1 and t, untouched            (mode="pixels")
+                                   (baselines: the model runs preprocess_image() itself, on the GPU)
     lang            384            MiniLM vector of the instruction
     instruction     text, and instruction_id (index into language.npy)
     state           8              normalized; PushT has 2 real + 6 zeros
@@ -36,6 +38,7 @@ CHUNK = 16
 STATE_DIM = 8
 ACTION_DIM = 4
 EMBODIMENT_ID = {"pusht": 0, "fetch": 1}
+MODES = ("cached", "raw", "pixels")
 
 
 def split_episodes(n_episodes: int, val_frac: float = 0.1, seed: int = 0) -> tuple[list[int], list[int]]:
@@ -56,7 +59,8 @@ class WindowDataset(torch.utils.data.Dataset):
 
     robot_dir      <cache run>/<robot>/ from vla.data.cache_features
     split          "train", "val" (the episode split saved in stats.json) or "all"
-    mode           "cached" (DINOv2 features, frozen runs) or "raw" (images, adaptation runs)
+    mode           "cached" (DINOv2 features, frozen runs), "raw" (preprocessed images, adaptation
+                   runs) or "pixels" (uint8 frames, baselines)
     instructions   "train" (random one of 8), "heldout" (random one of 2), or k = fixed paraphrase k
     require_training_images   refuse debug-only images (only tests turn this off)
     """
@@ -69,8 +73,8 @@ class WindowDataset(torch.utils.data.Dataset):
             raise ValueError(f"{self.robot_dir} is not a feature-cache folder (see vla.data.cache_features)")
         if require_training_images:
             assert_training_images_ok(self.meta)
-        if mode not in ("cached", "raw"):
-            raise ValueError(f"mode must be 'cached' or 'raw', got {mode!r}")
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self.robot = self.meta["robot"]
         self.mode = mode
         root = self.robot_dir.parent
@@ -159,6 +163,8 @@ class WindowDataset(torch.utils.data.Dataset):
         frames = np.asarray(self._frames_array()[frame_ids])
         if self.mode == "cached":
             sample["vision"] = torch.from_numpy(frames.astype(np.float32))
+        elif self.mode == "pixels":
+            sample["pixels"] = torch.from_numpy(np.ascontiguousarray(frames))
         else:
             from vla.models.encoders import preprocess_image
 

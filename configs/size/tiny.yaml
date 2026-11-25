@@ -22,3 +22,7 @@ train:
   save_checkpoint: true
 eval:
   n_episodes: 2
+bc:                          # baselines: small and fast, and never download ResNet weights on the Mac
+  hidden: 32
+  image_size: 32
+  pretrained: false

@@ -2,6 +2,7 @@
 
     python -m vla.train cond=film seed=1                      # full run
     python -m vla.train size=tiny train.steps=20 --allow-dirty   # Mac CPU check
+    python -m vla.train baseline=resnet18 robot=fetch seed=1  # a per-robot baseline (Phase 5)
 
 What one run does:
 1. Refuses to start with uncommitted code (every number must trace to a commit), unless
@@ -11,6 +12,8 @@ What one run does:
 3. Uses the cache's own episode split and normalization (stats.json); nothing is recomputed.
    Data is read from read-only memory-mapped files; nothing is copied.
 4. Every batch is 50% PushT, 50% FetchPush. The loss weights the two robots equally.
+   A baseline (baseline=bc_mlp|resnet18, robot=pusht|fetch) trains on its one robot instead,
+   reading raw uint8 frames (data.mode=pixels); everything else below is the same.
 5. AdamW, 500 warmup steps then cosine decay to 0, fp16 autocast + GradScaler on CUDA,
    gradient clipping at 1.0. Logs to W&B; validation loss every 1,000 steps.
 6. Writes a run folder: config.yaml, git.txt, metrics.json, ckpt.pt, plus copies of the cache's
@@ -35,7 +38,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 from vla.data.cache_features import find_feature_caches, pick_feature_cache, print_feature_caches
 from vla.data.dataset import MixedBatchSampler, WindowDataset, split_episodes
 from vla.data.normalize import Normalizer
-from vla.models.policy import ROBOT_NAMES, build_policy, count_params
+from vla.models.policy import ROBOT_NAMES, build_model, count_params, is_baseline
 from vla.utils.config import load_config, to_dict
 from vla.utils.runtime import get_device, inputs_dir, is_kaggle, load_dotenv_if_local, outputs_dir
 from vla.utils.seed import seed_everything, worker_init_fn
@@ -48,9 +51,9 @@ SPLIT_SEED = 0  # the cache's episode split (vla.data.cache_features.write_stats
 
 
 def make_optimizer(model: nn.Module, optim_cfg) -> torch.optim.AdamW:
-    """AdamW. Weight decay only on Linear weight matrices; biases, LayerNorms, embeddings and the
-    learned query/position vectors are not decayed (standard practice for transformers)."""
-    linear_weights = {id(m.weight) for m in model.modules() if isinstance(m, nn.Linear)}
+    """AdamW. Weight decay only on Linear and Conv2d weight matrices (ResNet-18); biases, LayerNorms,
+    BatchNorms, embeddings and the learned query/position vectors are not decayed (standard practice)."""
+    linear_weights = {id(m.weight) for m in model.modules() if isinstance(m, (nn.Linear, nn.Conv2d))}
     decay, no_decay = [], []
     for p in model.parameters():
         if p.requires_grad:
@@ -105,15 +108,21 @@ def check_split(cache_dir: Path, stats: dict) -> dict:
     return split
 
 
+def train_robots(cfg) -> tuple[str, ...]:
+    """Robots a run trains on: both for the VLA, cfg.robot for a baseline."""
+    return (cfg.robot,) if is_baseline(cfg) else ROBOT_NAMES
+
+
 def build_datasets(cache_dir: Path, cfg, require_training_images: bool):
-    """Train and val WindowDatasets for both robots, sharing one Normalizer from stats.json."""
+    """Train and val WindowDatasets for the run's robots, sharing one Normalizer from stats.json."""
     normalizer = Normalizer.load(cache_dir / "stats.json")
     split = check_split(cache_dir, normalizer.stats)
+    robots = train_robots(cfg)
     kw = dict(mode=cfg.data.mode, normalizer=normalizer, require_training_images=require_training_images,
               seed=cfg.seed)
-    train_sets = [WindowDataset(cache_dir / r, split="train", instructions="train", **kw) for r in ROBOT_NAMES]
-    val_sets = [WindowDataset(cache_dir / r, split="val", instructions="train", **kw) for r in ROBOT_NAMES]
-    return train_sets, val_sets, split
+    train_sets = [WindowDataset(cache_dir / r, split="train", instructions="train", **kw) for r in robots]
+    val_sets = [WindowDataset(cache_dir / r, split="val", instructions="train", **kw) for r in robots]
+    return train_sets, val_sets, {r: split[r] for r in robots}
 
 
 def _loader_kwargs(cfg, device: str, seed: int) -> dict:
@@ -126,7 +135,8 @@ def _loader_kwargs(cfg, device: str, seed: int) -> dict:
 
 
 def make_train_loader(train_sets, cfg, device: str) -> DataLoader:
-    """Endless 50/50 batches (robot order = embodiment id: PushT, FetchPush)."""
+    """Endless 50/50 batches (robot order = embodiment id: PushT, FetchPush). With one robot
+    (baselines) every batch is that robot's, shuffled and reshuffled after each pass."""
     sampler = MixedBatchSampler([len(d) for d in train_sets], int(cfg.data.batch_size), seed=int(cfg.seed))
     return DataLoader(ConcatDataset(train_sets), batch_sampler=sampler,
                       persistent_workers=int(cfg.data.num_workers) > 0, **_loader_kwargs(cfg, device, cfg.seed))
@@ -138,8 +148,9 @@ def to_device(batch: dict, device: str) -> dict:
 
 @torch.no_grad()
 def validate(model, val_sets, cfg, device: str, use_amp: bool) -> dict:
-    """Masked L1 over ALL val windows, per robot; val loss = average of the two robot means
-    (the same equal-weight rule as the training loss). Same windows and instructions every time."""
+    """Masked L1 over ALL val windows, per robot; val loss = average of the robot means
+    (the same equal-weight rule as the training loss). Same windows and instructions every time.
+    Only the robots in val_sets are reported (a baseline has one)."""
     model.eval()
     sums = torch.zeros(len(ROBOT_NAMES), device=device)
     counts = torch.zeros(len(ROBOT_NAMES), device=device)
@@ -155,24 +166,32 @@ def validate(model, val_sets, cfg, device: str, use_amp: bool) -> dict:
             counts += out["counts"]
     model.train()
     means = (sums / counts.clamp(min=1)).tolist()
-    present = [m for m, c in zip(means, counts.tolist()) if c > 0]
+    robots = [ds.robot for ds in val_sets]
+    present = [m for name, m, c in zip(ROBOT_NAMES, means, counts.tolist()) if c > 0 and name in robots]
     return {"loss": sum(present) / len(present),
-            **{f"loss_{name}": m for name, m in zip(ROBOT_NAMES, means)}}
+            **{f"loss_{name}": m for name, m in zip(ROBOT_NAMES, means) if name in robots}}
 
 
 # --- run folder -------------------------------------------------------------------
 
 
+def model_name(cfg) -> str:
+    """What the run's W&B group and folder name start with: <cond>-<adapt> for the VLA
+    (film-frozen), <baseline>-<robot> for a baseline (resnet18-fetch)."""
+    return f"{cfg.baseline}-{cfg.robot}" if is_baseline(cfg) else f"{cfg.cond}-{cfg.adapt}"
+
+
 def run_key(cfg) -> str:
-    """What makes two runs "the same experiment", without the commit, e.g. film-frozen-full-s0-4000steps.
-    The run queue skips a config whose key already has a finished, evaluated run in W&B."""
-    return f"{cfg.cond}-{cfg.adapt}-{cfg.size}-s{cfg.seed}-{int(cfg.train.steps)}steps"
+    """What makes two runs "the same experiment", without the commit, e.g. film-frozen-full-s0-4000steps
+    or resnet18-fetch-full-s1-4000steps. The run queue skips a config whose key already has a
+    finished, evaluated run in W&B."""
+    return f"{model_name(cfg)}-{cfg.size}-s{cfg.seed}-{int(cfg.train.steps)}steps"
 
 
 def make_run_dir(cfg, commit: str, prefix: str = "") -> Path:
-    """<outputs>/<prefix><cond>-<adapt>-s<seed>-<commit7>, e.g. film-frozen-s1-3f9a2c1.
-    A timestamp (and a counter) is added if that folder already exists."""
-    name = f"{prefix}{cfg.cond}-{cfg.adapt}-s{cfg.seed}-{commit[:7]}"
+    """<outputs>/<prefix><cond>-<adapt>-s<seed>-<commit7>, e.g. film-frozen-s1-3f9a2c1
+    (baselines: bc_mlp-pusht-s0-3f9a2c1). A timestamp (and a counter) is added if that folder exists."""
+    name = f"{prefix}{model_name(cfg)}-s{cfg.seed}-{commit[:7]}"
     candidates = [name, f"{name}-{time.strftime('%Y%m%d-%H%M%S')}"]
     candidates += [f"{candidates[1]}-{i}" for i in range(2, 100)]
     for candidate in candidates:
@@ -190,7 +209,10 @@ def make_run_dir(cfg, commit: str, prefix: str = "") -> Path:
 
 def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
     """Run one training job described by cfg (from load_config). Returns the run folder."""
-    if cfg.adapt != "frozen" or cfg.data.mode != "cached":
+    baseline = is_baseline(cfg)
+    if baseline and cfg.data.mode != "pixels":
+        raise ValueError(f"baselines read raw frames: data.mode must be 'pixels', got {cfg.data.mode!r}")
+    if not baseline and (cfg.adapt != "frozen" or cfg.data.mode != "cached"):
         raise NotImplementedError("only frozen encoders with cached features exist so far (Phase 6 adds the rest)")
     git = git_commit()
     if git["dirty"] and not allow_dirty:
@@ -204,10 +226,11 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
 
     cache = resolve_cache(cfg)
     cache_dir = cache["path"]
+    robots = train_robots(cfg)
     train_sets, val_sets, split = build_datasets(cache_dir, cfg, require_training_images=cache["training_ok"])
     loader = make_train_loader(train_sets, cfg, device)
 
-    model = build_policy(cfg).to(device)
+    model = build_model(cfg).to(device)
     n_trainable, n_total = count_params(model), count_params(model, trainable_only=False)
     gpu = torch.cuda.get_device_name(0) if device == "cuda" else None
 
@@ -215,23 +238,25 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
     for name in ("stats.json", "language.npy"):  # the run folder is self-contained for evaluation
         shutil.copy2(cache_dir / name, run_dir / name)
     run_info = {
-        "run_id": run_dir.name, "key": run_key(cfg), "git_commit": git["commit"], "git_dirty": git["dirty"],
+        "run_id": run_dir.name, "key": run_key(cfg), "model": cfg.baseline if baseline else "vla",
+        "robots": list(robots), "git_commit": git["commit"], "git_dirty": git["dirty"],
         "cache_dir": str(cache_dir), "debug_data": not cache["training_ok"], "device": device, "gpu": gpu,
         "amp": use_amp, "torch": str(torch.__version__), "on_kaggle": is_kaggle(),
         "trainable_params": n_trainable, "total_params": n_total,
-        "train_windows": {r: len(d) for r, d in zip(ROBOT_NAMES, train_sets)},
-        "val_windows": {r: len(d) for r, d in zip(ROBOT_NAMES, val_sets)},
+        "train_windows": {r: len(d) for r, d in zip(robots, train_sets)},
+        "val_windows": {r: len(d) for r, d in zip(robots, val_sets)},
     }
     config = {**to_dict(cfg), "run": run_info}
     save_run_info(run_dir, config, git)
 
     import wandb
 
-    wb = wandb.init(project=cfg.wandb.project, name=run_dir.name, group=f"{cfg.cond}-{cfg.adapt}",
+    wb = wandb.init(project=cfg.wandb.project, name=run_dir.name, group=model_name(cfg),
                     job_type="train", config=config, dir=str(run_dir))
     print(f"Run {run_dir.name} | device {device}{f' ({gpu})' if gpu else ''} | fp16 autocast: {use_amp}")
-    print(f"Variant {cfg.cond} | trainable parameters {n_trainable:,} | batch {cfg.data.batch_size} "
-          f"(half PushT, half FetchPush) | {steps} steps")
+    what = f"Baseline {cfg.baseline} on {cfg.robot}" if baseline else f"Variant {cfg.cond}"
+    mix = f"all {cfg.robot}" if baseline else "half PushT, half FetchPush"
+    print(f"{what} | trainable parameters {n_trainable:,} | batch {cfg.data.batch_size} ({mix}) | {steps} steps")
     print(f"Train windows {run_info['train_windows']} | val windows {run_info['val_windows']}")
 
     optimizer = make_optimizer(model, cfg.optim)
@@ -242,7 +267,7 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
 
     skip = min(10, steps // 10)  # the first steps include worker start-up and CUDA warm-up: not timed
     timed = {"steps": 0, "data": 0.0, "compute": 0.0}
-    window = {"steps": 0, "data": 0.0, "compute": 0.0, "loss": 0.0, "pusht": 0.0, "fetch": 0.0}
+    window = {"steps": 0, "data": 0.0, "compute": 0.0, "loss": 0.0, **dict.fromkeys(robots, 0.0)}
     last_train, val_curve, bad_steps = {}, [], 0
     wall_start = time.perf_counter()
 
@@ -275,17 +300,15 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
             timed["data"] += t1 - t0
             timed["compute"] += t2 - t1
         for key, value in (("steps", 1), ("data", t1 - t0), ("compute", t2 - t1), ("loss", loss),
-                           ("pusht", out["loss_pusht"].item()), ("fetch", out["loss_fetch"].item())):
+                           *((r, out[f"loss_{r}"].item()) for r in robots)):
             window[key] += value
 
         if step % log_every == 0 or step == steps:
             n = window["steps"]
             seconds = window["data"] + window["compute"]
-            last_train = {"loss": window["loss"] / n, "loss_pusht": window["pusht"] / n,
-                          "loss_fetch": window["fetch"] / n}
+            last_train = {"loss": window["loss"] / n, **{f"loss_{r}": window[r] / n for r in robots}}
             log = {
-                "train/loss": last_train["loss"], "train/loss_pusht": last_train["loss_pusht"],
-                "train/loss_fetch": last_train["loss_fetch"], "train/lr": scheduler.get_last_lr()[0],
+                **{f"train/{k}": v for k, v in last_train.items()}, "train/lr": scheduler.get_last_lr()[0],
                 "train/grad_norm": float(grad_norm), "train/amp_scale": scaler.get_scale() if use_amp else 1.0,
                 "perf/steps_per_sec": n / seconds, "perf/data_ms": 1000 * window["data"] / n,
                 "perf/compute_ms": 1000 * window["compute"] / n, "perf/data_wait_frac": window["data"] / seconds,
@@ -293,8 +316,8 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
             if device == "cuda":
                 log["perf/gpu_mem_gb"] = torch.cuda.max_memory_allocated() / 1e9
             wb.log(log, step=step)
-            print(f"step {step:6d} | loss {log['train/loss']:.4f} (pusht {log['train/loss_pusht']:.4f}, "
-                  f"fetch {log['train/loss_fetch']:.4f}) | lr {log['train/lr']:.2e} | "
+            per_robot = ", ".join(f"{r} {last_train[f'loss_{r}']:.4f}" for r in robots)
+            print(f"step {step:6d} | loss {log['train/loss']:.4f} ({per_robot}) | lr {log['train/lr']:.2e} | "
                   f"{log['perf/steps_per_sec']:.2f} steps/s | data {log['perf/data_ms']:.1f} ms, "
                   f"compute {log['perf/compute_ms']:.1f} ms")
             window = dict.fromkeys(window, 0.0)
@@ -304,19 +327,19 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
             val = validate(model, val_sets, cfg, device, use_amp)
             val_curve.append({"step": step, **val})
             wb.log({f"val/{k}": v for k, v in val.items()}, step=step)
-            print(f"step {step:6d} | VAL loss {val['loss']:.4f} (pusht {val['loss_pusht']:.4f}, "
-                  f"fetch {val['loss_fetch']:.4f})")
+            per_robot = ", ".join(f"{r} {val[f'loss_{r}']:.4f}" for r in robots)
+            print(f"step {step:6d} | VAL loss {val['loss']:.4f} ({per_robot})")
 
     del batches  # stops the data-loader workers
     wall = time.perf_counter() - wall_start
     timed_seconds = timed["data"] + timed["compute"]
     final_val = val_curve[-1]
     metrics = {
-        "run_id": run_dir.name, "run_key": run_info["key"], "cond": cfg.cond, "adapt": cfg.adapt, "seed": int(cfg.seed), "steps": steps,
-        "train_loss": last_train["loss"], "train_loss_pusht": last_train["loss_pusht"],
-        "train_loss_fetch": last_train["loss_fetch"],
-        "val_loss": final_val["loss"], "val_loss_pusht": final_val["loss_pusht"],
-        "val_loss_fetch": final_val["loss_fetch"], "val_curve": val_curve,
+        "run_id": run_dir.name, "run_key": run_info["key"], "model": run_info["model"],
+        "robot": cfg.robot, "cond": cfg.cond, "adapt": cfg.adapt, "seed": int(cfg.seed), "steps": steps,
+        "train_loss": last_train["loss"], **{f"train_loss_{r}": last_train[f"loss_{r}"] for r in robots},
+        "val_loss": final_val["loss"], **{f"val_loss_{r}": final_val[f"loss_{r}"] for r in robots},
+        "val_curve": val_curve,
         "steps_per_sec": timed["steps"] / timed_seconds if timed["steps"] else float("nan"),
         "data_ms_per_step": 1000 * timed["data"] / max(1, timed["steps"]),
         "compute_ms_per_step": 1000 * timed["compute"] / max(1, timed["steps"]),
@@ -325,7 +348,7 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
         "peak_gpu_mem_gb": torch.cuda.max_memory_allocated() / 1e9 if device == "cuda" else None,
         "peak_gpu_mem_reserved_gb": torch.cuda.max_memory_reserved() / 1e9 if device == "cuda" else None,
         "trainable_params": n_trainable, "total_params": n_total,
-        "batch_size": int(cfg.data.batch_size), "device": device, "gpu": gpu,
+        "batch_size": int(cfg.data.batch_size), "device": device, "gpu": gpu, "train_windows": run_info["train_windows"],
         "debug_data": run_info["debug_data"], "cache_dir": str(cache_dir), "split": split,
         "git_commit": git["commit"],
     }
@@ -335,10 +358,13 @@ def train(cfg, allow_dirty: bool = False, run_prefix: str = "") -> Path:
     print(f"Training done in {wall / 60:.1f} min.")
 
     if cfg.eval.enabled:
-        from vla.evaluate import evaluate_run, flat_metrics
+        from vla.evaluate import evaluate_baseline_run, evaluate_run, flat_metrics
 
         t0 = time.perf_counter()
-        result = evaluate_run(model, run_dir, cfg, device, wb=wb, cache_dir=cache_dir)
+        if baseline:  # its own robot only; no DINOv2 or MiniLM
+            result = evaluate_baseline_run(model, run_dir, cfg, device, wb=wb)
+        else:
+            result = evaluate_run(model, run_dir, cfg, device, wb=wb, cache_dir=cache_dir)
         eval_minutes = (time.perf_counter() - t0) / 60  # includes loading DINOv2 and MiniLM
         metrics.update(flat_metrics(result))
         metrics.update({"eval_minutes": eval_minutes, "eval": result})

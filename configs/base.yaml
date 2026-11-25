@@ -1,11 +1,15 @@
 # Shared defaults for every run (docs/spec.md "Training recipe"). Values are the spec's.
 # Pick a variant with group overrides, change any value with a dotted override, e.g.
 #   python -m vla.train cond=token seed=1 train.steps=5000
-# Groups: cond (configs/cond/), adapt (configs/adapt/), size (configs/size/).
+# Groups: cond (configs/cond/), adapt (configs/adapt/), baseline (configs/baseline/), size (configs/size/).
+# A baseline is a per-robot specialist instead of the VLA, e.g.
+#   python -m vla.train baseline=resnet18 robot=fetch seed=1
 
 cond: film        # none | token | film | sep_heads
 adapt: frozen     # frozen (full_ft and lora16 come in Phase 6)
+baseline: none    # none (the VLA) | bc_mlp | resnet18
 size: full        # full | tiny (Mac CPU tests)
+robot: both       # both (the VLA) | pusht | fetch (a baseline trains on one robot)
 seed: 0
 
 model:
@@ -17,10 +21,15 @@ model:
   n_queries: 16     # 16-step action chunks
   film_dim: 64      # robot embedding size for FiLM
 
+bc:                 # baselines only (docs/spec.md "Baselines"); configs/baseline/ sets these
+  image_size: 64    # frames are resized to this by preprocess_image() inside the model
+  hidden: 512       # MLP head: 3 Linear layers, this wide
+  pretrained: true  # ResNet-18: start from the ImageNet weights
+
 data:
   cache_dir: null           # null = search inputs_dir() (/kaggle/input on Kaggle) for the feature cache
-  mode: cached              # cached DINOv2 features (frozen encoders)
-  batch_size: 256           # half PushT, half FetchPush
+  mode: cached              # cached DINOv2 features (frozen encoders); baselines: pixels (raw uint8 frames)
+  batch_size: 256           # half PushT, half FetchPush (baselines: 128, one robot)
   val_batch_size: 512
   num_workers: 4            # Kaggle gives 4 CPU cores
   prefetch_factor: 4

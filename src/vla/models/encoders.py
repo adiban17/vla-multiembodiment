@@ -2,6 +2,7 @@
 
     preprocess_image()  uint8 camera frames -> 224x224 ImageNet-normalized float tensors.
                         Used by feature caching, training and evaluation. Never write a second copy.
+                        The baselines use it too, with size=64 (BC-MLP) or 224 (ResNet-18).
     DinoV2Encoder       DINOv2-small: one image -> CLS + 16x16 patch vectors (384 each);
                         we average-pool the patches to 8x8, giving 65 x 384 per frame.
     MiniLMEncoder       all-MiniLM-L6-v2: one sentence -> one 384 vector (mean of token
@@ -25,12 +26,16 @@ POOLED_GRID = 8  # 16x16 patches -> 8x8
 FEATURE_DIM = 384
 
 
-def preprocess_image(images) -> torch.Tensor:
-    """uint8 images -> float32 (N, 3, 224, 224), ready for DINOv2.
+def preprocess_image(images, size: int = IMAGE_SIZE) -> torch.Tensor:
+    """uint8 images -> float32 (N, 3, size, size), ready for DINOv2 (size 224) or a baseline.
 
     Accepts numpy or torch, one image (H, W, 3) or a batch (N, H, W, 3) or (N, 3, H, W).
-    Steps: scale to [0, 1], bicubic resize to 224x224, clamp (bicubic can overshoot), then
+    Steps: scale to [0, 1], bicubic resize to size x size, clamp (bicubic can overshoot), then
     subtract the ImageNet mean and divide by the std. Runs on the input tensor's device.
+
+    Antialiasing is used only when shrinking (e.g. 128 -> 64 for BC-MLP), where it stops fine
+    detail from turning into noise. Enlarging (96 or 128 -> 224, the DINOv2 path) never uses it,
+    so the feature cache's preprocessing is exactly what it always was.
     """
     x = images if isinstance(images, torch.Tensor) else torch.from_numpy(np.ascontiguousarray(images))
     if x.dtype != torch.uint8:
@@ -42,7 +47,8 @@ def preprocess_image(images) -> torch.Tensor:
     if x.shape[-1] == 3:
         x = x.permute(0, 3, 1, 2)  # NHWC -> NCHW
     x = x.float() / 255.0
-    x = F.interpolate(x, size=(IMAGE_SIZE, IMAGE_SIZE), mode="bicubic", align_corners=False).clamp_(0.0, 1.0)
+    shrink = size < min(x.shape[-2:])
+    x = F.interpolate(x, size=(size, size), mode="bicubic", align_corners=False, antialias=shrink).clamp_(0.0, 1.0)
     mean = torch.tensor(IMAGENET_MEAN, device=x.device).view(1, 3, 1, 1)
     std = torch.tensor(IMAGENET_STD, device=x.device).view(1, 3, 1, 1)
     return (x - mean) / std

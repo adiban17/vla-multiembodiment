@@ -72,6 +72,19 @@ def balanced_l1(pred, target, dim_mask, is_pad, embodiment_id, n_robots: int = N
     return loss, robot_sums, robot_counts
 
 
+def chunk_loss(model: nn.Module, batch: dict) -> dict:
+    """The training loss of any policy here (the VLA or a baseline): balanced masked L1 of its
+    (B, 16, 4) prediction. {"loss", "loss_pusht", "loss_fetch", "sums", "counts", "pred"}.
+    A one-robot batch (baselines) gives that robot's mean; the other robot's count is 0."""
+    pred = model(batch)
+    loss, sums, counts = balanced_l1(pred, batch["actions"], batch["action_dim_mask"],
+                                     batch["action_is_pad"], batch["embodiment_id"])
+    out = {"loss": loss, "sums": sums, "counts": counts, "pred": pred}
+    for i, name in enumerate(ROBOT_NAMES):
+        out[f"loss_{name}"] = sums[i] / counts[i].clamp(min=1)
+    return out
+
+
 # --- model --------------------------------------------------------------------
 
 
@@ -141,13 +154,7 @@ class VLAPolicy(nn.Module):
 
     def loss(self, batch: dict) -> dict:
         """{"loss": balanced L1, "loss_pusht", "loss_fetch", "sums", "counts", "pred"}."""
-        pred = self(batch)
-        loss, sums, counts = balanced_l1(pred, batch["actions"], batch["action_dim_mask"],
-                                         batch["action_is_pad"], batch["embodiment_id"])
-        out = {"loss": loss, "sums": sums, "counts": counts, "pred": pred}
-        for i, name in enumerate(ROBOT_NAMES):
-            out[f"loss_{name}"] = sums[i] / counts[i].clamp(min=1)
-        return out
+        return chunk_loss(self, batch)
 
 
 def build_policy(cfg) -> VLAPolicy:
@@ -155,6 +162,20 @@ def build_policy(cfg) -> VLAPolicy:
     m = cfg.model
     return VLAPolicy(cfg.cond, width=m.width, depth=m.depth, heads=m.heads, ffn=m.ffn, dropout=m.dropout,
                      n_queries=m.n_queries, film_dim=m.film_dim)
+
+
+def is_baseline(cfg) -> bool:
+    """True for a per-robot baseline config (old configs without the key are the VLA)."""
+    return cfg.get("baseline", "none") not in (None, "none")
+
+
+def build_model(cfg) -> nn.Module:
+    """The VLA policy, or the baseline the config names (vla.models.baselines)."""
+    if is_baseline(cfg):
+        from vla.models.baselines import build_baseline
+
+        return build_baseline(cfg)
+    return build_policy(cfg)
 
 
 def count_params(model: nn.Module, trainable_only: bool = True) -> int:
