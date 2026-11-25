@@ -173,6 +173,119 @@ def data_fetch() -> Path:
     return _data_fetch("data_fetch", n_success=500)
 
 
+# --- Phase 2: feature cache ---------------------------------------------------
+
+
+def find_datasets(root: Path) -> list[tuple[Path, dict]]:
+    """Every Phase 1 dataset folder under root: has meta.json AND shard_*.npz, and is not a
+    feature cache. Kaggle folder names contain a commit and timestamp, so we search instead
+    of hardcoding them."""
+    from vla.data.shards import read_meta
+
+    found = []
+    for meta_path in sorted(Path(root).rglob("meta.json")):
+        folder = meta_path.parent
+        if not any(folder.glob("shard_*.npz")):
+            continue
+        meta = read_meta(folder)
+        if meta.get("kind") == "features" or "robot" not in meta:
+            continue
+        found.append((folder, meta))
+    return found
+
+
+def pick_datasets(found: list[tuple[Path, dict]], require_training_images: bool) -> dict:
+    """One dataset per robot: the one with the most episodes (so data_fetch wins over
+    data_fetch_smoke). With require_training_images, debug-only datasets are skipped."""
+    picked = {}
+    for robot in ("pusht", "fetch"):
+        options = [(d, m) for d, m in found if m["robot"] == robot]
+        if require_training_images:
+            options = [(d, m) for d, m in options if m.get("images_for_training")]
+        if not options:
+            raise RuntimeError(
+                f"no {robot} dataset{' with training-ok images' if require_training_images else ''} found. "
+                f"Attach the {'data_pusht' if robot == 'pusht' else 'data_fetch'} notebook output with Add Input.")
+        picked[robot] = max(options, key=lambda dm: dm[1].get("n_episodes", 0))[0]
+    return picked
+
+
+def _cache_features(job: str, max_episodes: int | None) -> Path:
+    import torch
+    import wandb
+
+    from vla.data.cache_features import build_cache, print_size_report, print_stats, verify_cache
+    from vla.models.encoders import DinoV2Encoder, MiniLMEncoder, encode_frames
+    from vla.utils.runtime import inputs_dir
+
+    root = inputs_dir()
+    print(f"Searching {root} for datasets (folders with meta.json + shard_*.npz):")
+    found = find_datasets(root)
+    for folder, meta in found:
+        print(f"  {meta['robot']:6s} {meta.get('n_episodes', '?'):>4} episodes  "
+              f"training images: {bool(meta.get('images_for_training'))!s:5s}  {folder}")
+    picked = pick_datasets(found, require_training_images=is_kaggle())
+    for robot, folder in picked.items():
+        print(f"Using {robot}: {folder}")
+    if not is_kaggle():
+        print("WARNING: not on Kaggle, so debug-only datasets are allowed; such caches stay debug-only.")
+
+    device = get_device()
+    dino = DinoV2Encoder().to(device)
+    minilm = MiniLMEncoder().to(device)
+    batch_size = 256 if device == "cuda" else 32
+    encode = lambda frames: encode_frames(dino, frames, device, batch_size)  # noqa: E731
+    encoder_info = {**dino.info(), **minilm.info()}
+
+    run_dir, config = _start_data_run(job, {
+        "max_episodes": max_episodes, "device": device, "torch": str(torch.__version__),
+        "inputs": {robot: str(folder) for robot, folder in picked.items()}, **encoder_info,
+    })
+    t0 = time.time()
+    summary = build_cache(run_dir, picked, encode, minilm.encode, max_episodes, encoder_info)
+    seconds = time.time() - t0
+    print("Normalization stats (train split):")
+    print_stats(summary["stats"])
+    print("Size report:")
+    print_size_report(summary["size_report"], list(picked))
+
+    print("Cached vs live features:")
+    checks = {}
+    for robot, folder in picked.items():
+        checks[robot] = verify_cache(run_dir / robot, folder, encode)
+        c = checks[robot]
+        print(f"  {robot:6s} {c['n_checked']} frames | max |diff| {c['max_abs_diff']:.2e} "
+              f"(largest feature {c['max_abs_feature']:.1f}) | images equal: {c['images_equal']} | ok: {c['ok']}")
+
+    metrics = {"seconds": round(seconds, 1), "frames_per_second": round(summary["size_report"]["total_frames"] / seconds, 1),
+               **{k: v for k, v in summary["size_report"].items() if not isinstance(v, dict)}}
+    for robot in picked:
+        metrics[f"{robot}_frames"] = summary["robots"][robot]["n_frames"]
+        metrics[f"{robot}_images_for_training"] = summary["robots"][robot]["images_for_training"]
+        metrics.update({f"{robot}_check_{k}": v for k, v in checks[robot].items()})
+    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    run = wandb.init(project=WANDB_PROJECT, job_type="cache", name=run_dir.name, config=config, dir=str(run_dir))
+    run.summary.update(metrics)
+    run.finish()
+
+    if not all(c["ok"] for c in checks.values()):
+        raise RuntimeError(f"cached features do not match live features: {checks}")
+    print(f"Done in {seconds:.0f}s. Saved run folder: {run_dir}")
+    return run_dir
+
+
+@register("cache_features_smoke")
+def cache_features_smoke() -> Path:
+    """Phase 2: feature cache of the first 3 episodes per robot (quick interactive test)."""
+    return _cache_features("cache_features_smoke", max_episodes=3)
+
+
+@register("cache_features")
+def cache_features() -> Path:
+    """Phase 2: DINOv2 + MiniLM feature cache, raw images, stats.json for all episodes."""
+    return _cache_features("cache_features", max_episodes=None)
+
+
 # --- command line -----------------------------------------------------------
 
 
@@ -194,7 +307,7 @@ def main() -> None:
 
     if args.list or not args.job:
         for name, fn in sorted(JOBS.items()):
-            print(f"{name:12s} {(fn.__doc__ or '').strip().splitlines()[0]}")
+            print(f"{name:22s} {(fn.__doc__ or '').strip().splitlines()[0]}")
         return
 
     load_dotenv_if_local()

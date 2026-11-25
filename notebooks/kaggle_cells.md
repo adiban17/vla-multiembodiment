@@ -48,7 +48,16 @@ Change `hello` to the job you want. `python scripts/kaggle_job.py --list` shows 
 | `data_fetch_smoke` | GPU T4 x2 (EGL rendering) | 5 FetchPush demos with images, 3 videos | 1 min |
 | `data_fetch` | GPU T4 x2 (EGL rendering) | 500 FetchPush demos with images, 3 videos | 15-30 min |
 
+| `cache_features_smoke` | GPU T4 x2 | feature cache of the first 3 episodes per robot; prints the datasets found, stats, sizes and the cached-vs-live check | 2-3 min |
+| `cache_features` | GPU T4 x2 | DINOv2 + MiniLM features (fp16), raw images (uint8), `stats.json`, `size_report.json` for all episodes | 10-30 min |
+
 Run `data_fetch_smoke` before `data_fetch`, and watch its videos in W&B first.
+
+**Before the cache jobs:** in the notebook's right panel, **Add Input** → the saved outputs of your
+`data_pusht` and `data_fetch` notebooks. The job searches `/kaggle/input/` for folders with
+`meta.json` and prints what it found, so the folder names do not matter. If both `data_fetch_smoke`
+and `data_fetch` are attached, it uses the one with more episodes. Run `cache_features_smoke`
+interactively first, then `cache_features` as **Save & Run All (Commit)** (about 4.5 GB of output).
 For long jobs use **Save Version → Save & Run All (Commit)** so the outputs are kept.
 
 ## Where results go

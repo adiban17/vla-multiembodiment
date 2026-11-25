@@ -55,7 +55,7 @@ The user is new to Claude Code, Python packaging and robotics: explain what you 
 configs/                 YAML configs (base, cond/, adapt/, baseline/)
 src/vla/envs/            PushT and FetchPush wrappers
 src/vla/data/            shards.py (.npz format), fetch_expert, collect_fetch, pusht_loader (lerobot env),
-                         lerobot_env, pusht_compare; later: dataset, normalization, feature cache
+                         lerobot_env, pusht_compare, normalize, instructions, dataset, cache_features
 src/vla/models/          encoders (+ preprocess_image), trunk, conditioning, policy, baselines
 src/vla/utils/           runtime.py (paths, device), tracking.py (git, run info), config, seed
 src/vla/train.py, evaluate.py
@@ -77,3 +77,9 @@ notebooks/kaggle_cells.md   the two Kaggle cells
 - Phase 1 (envs + data): built and tested on the Mac. Kaggle jobs `data_pusht`, `data_fetch_smoke`,
   `data_fetch` not run yet. Pins: mujoco 3.9.0 (gymnasium-robotics 1.4.2 breaks on mujoco 4.x).
   FetchPush camera: `vla.envs.fetch.CAMERA` (45° front view, 128x128); the arm sometimes hides the cube.
+- Phase 2 (dataset + cache): built and tested on the Mac. Kaggle jobs `cache_features_smoke`, `cache_features`
+  not run yet. A cache run folder is self-contained (stats.json, language.npy, `<robot>/` with lowdim.npz,
+  vision.npy fp16, images.npy uint8); `WindowDataset(run/<robot>, mode="cached"|"raw")` reads it.
+  Normalization: dims with train range < 0.01 are constant (-> 0); FetchPush actions are identity.
+  Mac debug data lives in `runs/debug/pusht` and `runs/debug/fetch_mac_render`
+  (`VLA_INPUTS_DIR=runs/debug` runs the cache jobs locally).
