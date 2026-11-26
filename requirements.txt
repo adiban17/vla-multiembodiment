@@ -30,6 +30,9 @@ peft==0.22.0
 accelerate==1.16.0
 psutil==7.2.2
 
+# Results plots (Phase 7, scripts/plots.py). Mac only: aggregation never runs on Kaggle.
+matplotlib==3.11.2
+
 # Mac only: reads WANDB_API_KEY from the gitignored .env file
 python-dotenv==1.2.4
 

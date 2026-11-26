@@ -67,7 +67,9 @@ src/vla/evaluate.py      rollout harness: expert/random/VLA policies, Wilson int
 scripts/kaggle_job.py    registry of named jobs run on Kaggle (and locally on CPU)
 scripts/run_queue.py     runs configs two at a time (one per GPU), skips runs finished in W&B
 scripts/fetch_start_check.py   counts FetchPush eval starts already solved (CPU, no policy)
+scripts/aggregate.py     W&B -> results/ + README results block (Mac only); scripts/plots.py draws from results.csv
 tests/                   checks, written before each phase's code
+results/                 Phase 7 outputs (committed): results.csv, tables.md, findings.md, bc_mlp_fetch.md, plots/, gifs/
 notebooks/kaggle_cells.md   the two Kaggle cells
 ```
 
@@ -119,3 +121,11 @@ notebooks/kaggle_cells.md   the two Kaggle cells
   `evaluate_run` uses the run's own adapted encoder when the model has one (never `load_encoders`).
   Metrics: `peak_gpu_mem_gb_at_200`, `val_seconds`, `encoder_trainable_params`. peft 0.22.0 (Mac also pins
   accelerate 1.16.0, psutil 7.2.2; Kaggle pins only peft). `kaggle_job.py --steps N` goes to jobs that take `steps`.
+- Phase 7 (results): built and run on the Mac. `scripts/aggregate.py` pulls finished, evaluated, non-smoke, non-debug
+  train runs from W&B, lines them up against the 30 planned run keys (missing/running marked; rerun any time) and writes
+  results/ + the README block between `<!-- results:start -->` and `<!-- results:end -->` (never edit inside it by hand).
+  W&B has only per-run totals for runs before Phase 7: per-seed results come from Kaggle `metrics.json` files put under
+  `outputs/kaggle/` (`--episodes-dir`); otherwise the paired bootstrap uses the 5 ten-episode blocks in `output.log`,
+  labeled "approx." and never called real. `log_eval` now also writes `eval/<robot>_episode_success` ("0110...").
+  Gap rule: real only if the exact bootstrap interval excludes 0. GIFs: best seed of the best variant, captioned as
+  an illustration. matplotlib 3.11.2 (Mac only). Downloads are cached in `outputs/aggregate_cache/`.

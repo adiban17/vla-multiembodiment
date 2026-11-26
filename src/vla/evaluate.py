@@ -495,6 +495,15 @@ def log_eval(wb, result: dict, tag: str = "") -> None:
             log[f"video{tag}/{Path(path).stem}"] = wandb.Video(path, format="mp4")
     wb.log(log)
     wb.summary.update({f"eval{tag}/{k}": v for k, v in flat.items()})
+    # which start seeds succeeded, one character per episode ("0110..."), so scripts/aggregate.py can run a
+    # paired bootstrap from W&B alone (the totals above do not say WHICH starts succeeded)
+    wb.summary.update({f"eval{tag}/{robot}_episode_success": episode_string(result[robot]["episodes"])
+                       for robot in ROBOTS if robot in result})
+
+
+def episode_string(episodes: list[dict]) -> str:
+    """'1' for a success and '0' for a failure, in start-seed order."""
+    return "".join("1" if e["success"] else "0" for e in sorted(episodes, key=lambda e: e["seed"]))
 
 
 def evaluate_baseline_run(model, run_dir, cfg, device: str, wb=None, n_episodes: int | None = None,

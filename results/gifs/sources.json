@@ -1,0 +1,50 @@
+[
+  {
+    "gif": "results/gifs/pusht_success.gif",
+    "variant": "sep_heads",
+    "wandb_id": "rgxuk3g9",
+    "run_name": "sep_heads-frozen-s2-75a68d5",
+    "seed": 2,
+    "best_seed": true,
+    "start_seed": 100002,
+    "robot": "pusht",
+    "success": true,
+    "video": "media/videos/video/eval_pusht_seed100002_success_4000_52ddc5a2ec94b1826d8d.mp4",
+    "run_pusht": "9/50",
+    "run_fetch": "38/50",
+    "run_mean_success": 0.47,
+    "variant_mean_success": 0.3766666666666667
+  },
+  {
+    "gif": "results/gifs/fetch_success.gif",
+    "variant": "sep_heads",
+    "wandb_id": "rgxuk3g9",
+    "run_name": "sep_heads-frozen-s2-75a68d5",
+    "seed": 2,
+    "best_seed": true,
+    "start_seed": 100001,
+    "robot": "fetch",
+    "success": true,
+    "video": "media/videos/video/eval_fetch_seed100001_success_4000_84237fca1ebe1ac2a0a1.mp4",
+    "run_pusht": "9/50",
+    "run_fetch": "38/50",
+    "run_mean_success": 0.47,
+    "variant_mean_success": 0.3766666666666667
+  },
+  {
+    "gif": "results/gifs/pusht_failure.gif",
+    "variant": "sep_heads",
+    "wandb_id": "rgxuk3g9",
+    "run_name": "sep_heads-frozen-s2-75a68d5",
+    "seed": 2,
+    "best_seed": true,
+    "start_seed": 100000,
+    "robot": "pusht",
+    "success": false,
+    "video": "media/videos/video/eval_pusht_seed100000_fail_4000_bfbca6e6628e9fc6c286.mp4",
+    "run_pusht": "9/50",
+    "run_fetch": "38/50",
+    "run_mean_success": 0.47,
+    "variant_mean_success": 0.3766666666666667
+  }
+]
