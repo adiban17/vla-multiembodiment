@@ -516,13 +516,18 @@ def _gap_rows(pairs, robots, method_note):
     return lines
 
 
-GAP_NOTE = ("Gaps are A − B in percentage points. The interval is a paired bootstrap (10,000 resamples) over the "
+def gap_note(all_exact: bool) -> str:
+    """The note under table 1. The "approx." explanation is only included while some run lacks per-seed data."""
+    note = ("Gaps are A − B in percentage points. The interval is a paired bootstrap (10,000 resamples) over the "
             "50 start seeds that every run shares, pooling the 3 training seeds; `*` = the interval excludes 0. "
-            "A gap is called real only when the exact (per-seed) interval excludes 0. \"approx.\" = per-seed "
-            "results were not available, so the bootstrap resamples the 5 blocks of 10 starts printed in each "
-            "run's console log. With only 5 units that interval is unreliable (too narrow and lumpy), so an "
-            "approx. `*` is provisional, not a claim. "
-            "The bootstrap treats the training seeds as fixed: it measures start-state noise, not seed-to-seed noise.")
+            "A gap is called real only when the exact (per-seed) interval excludes 0. ")
+    if all_exact:
+        note += "Every run has per-seed results, so every interval here is exact. "
+    else:
+        note += ("\"approx.\" = per-seed results were not available, so the bootstrap resamples the 5 blocks of 10 "
+                 "starts printed in each run's console log. With only 5 units that interval is unreliable (too narrow "
+                 "and lumpy), so an approx. `*` is provisional, not a claim. ")
+    return note + "The bootstrap treats the training seeds as fixed: it measures start-state noise, not seed-to-seed noise."
 
 
 def table_conditioning(rows) -> tuple[list[str], dict]:
@@ -546,7 +551,8 @@ def table_conditioning(rows) -> tuple[list[str], dict]:
         for j in range(i + 1, len(vs)):
             a, b = config_rows(rows, "conditioning", vs[i]), config_rows(rows, "conditioning", vs[j])
             pairs.append((f"{vs[i]} − {vs[j]}", {r: compare(a, b, r) for r in ("pusht", "fetch", "mean")}))
-    lines += ["Gaps between variants:", ""] + _gap_rows(pairs, ("pusht", "fetch", "mean"), GAP_NOTE) + [""]
+    all_exact = all(r.get("episodes_source") not in (None, "none") for r in rows if r["status"] == "finished")
+    lines += ["Gaps between variants:", ""] + _gap_rows(pairs, ("pusht", "fetch", "mean"), gap_note(all_exact)) + [""]
     return lines, {"summaries": sums, "pairs": pairs}
 
 

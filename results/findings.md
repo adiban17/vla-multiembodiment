@@ -1,24 +1,25 @@
 # Findings (Phase 7)
 
-Written on 2026-11-26 from `results/results.csv` and the tables in the README (both made by
+Written on 2026-11-27 from `results/results.csv` and the tables in the README (both made by
 `scripts/aggregate.py`). Every number below comes from those files, and the W&B run IDs are given
-in brackets. **Status:** all 30 planned runs have finished (9 conditioning, 12 baseline, 9 adaptation).
+in brackets. **Status:** all 30 planned runs have finished (9 conditioning, 12 baseline, 9 adaptation),
+and all 30 have per-seed results from their Kaggle `metrics.json` (`episodes_source = metrics.json`).
 
-**How to read the gaps.** A gap between two models is called **real** only if its 95% paired-bootstrap
-interval excludes 0. Otherwise it is **not distinguishable**. Per-seed results are still not available:
-W&B holds only totals such as 32/50 for these runs, and the downloaded Kaggle notebooks
-(`outputs/kaggle/*.ipynb`) hold only the console output, not the run folders' `metrics.json`. So every
-bootstrap below is the approximate one: it resamples 5 blocks of 10 start seeds read from the console
-logs. Five units are too few for a trustworthy interval, so an approximate interval that excludes 0 is
-**provisional**, not real. There is one exception. A gap is called real when the approximate interval
-excludes 0, the pooled Wilson intervals do not overlap, *and* every training seed of one model beats
-every seed of the other. Such a gap is too large for the bootstrap's precision to matter. The exact
-bootstrap over the 50 start seeds will replace all of this once the `metrics.json` files are downloaded
-(see "What would change these numbers").
+**How to read the gaps.** A gap between two models is called **real** only if its exact 95% paired
+bootstrap interval excludes 0. The bootstrap resamples the 50 start seeds that every run shares and
+pools the 3 training seeds. If the interval includes 0 (or reaches exactly 0), the gap is **not
+distinguishable**. Every interval in this file is exact. The approximate 5-block intervals and the
+"provisional" labels of the earlier version are gone (see "What changed" at the end).
+
+Two limits of the bootstrap. It treats the training seeds as fixed, so it measures luck in the start
+states, not luck in training. Where the training seeds of two models overlap, that is said below.
+It is also run on many pairs (26 gaps in the README). At 95%, about 1 in 20 true-zero gaps would
+exclude 0 by chance, so a single borderline gap is weak evidence.
 
 **The FetchPush floor.** 5 of the 50 FetchPush starts (seeds 100004, 100010, 100021, 100036, 100049)
 already have the cube within 5 cm of the target. A robot that does nothing therefore scores 10%. Every
-FetchPush number below is compared with that 10%.
+FetchPush number below is compared with that 10%, and the "unsolved starts" numbers count only the
+other 45 starts per run (135 per configuration), where a do-nothing robot scores 0%.
 
 ---
 
@@ -26,9 +27,9 @@ FetchPush number below is compared with that 10%.
 
 - **FetchPush:** 59–68% success over 150 rollouts per variant (token 64.7%, film 59.3%, sep_heads
   68.0%). That is **+49 to +58 pp above the 10% floor**, and the pooled Wilson intervals (lowest bound
-  51.3%) are far above 10%. It also holds when the 5 free starts are removed. Without per-seed data
-  only a range is known, and even its worst case is 74/135 = 55% (film) on starts that need real
-  pushing.
+  51.3%) are far above 10%. It also holds on the 45 unsolved starts alone: token 82/135 = 60.7%
+  [52.3, 68.6], film 74/135 = 54.8% [46.4, 63.0], sep_heads 88/135 = 65.2% [56.8, 72.7]
+  (95% Wilson). These are starts where the robot really has to push the cube.
 - **PushT:** 3–7% success (token 3.3%, film 7.3%, sep_heads 7.3%; pooled Wilson upper bounds 7.6–12.7%).
   The softer measure, mean max coverage, is about 0.47–0.52. So on average the policy gets the T about
   half-way onto the target, but rarely to the 95% needed for success.
@@ -39,41 +40,57 @@ FetchPush number below is compared with that 10%.
 Runs: token `neo2m4ux` `vzqwyyqd` `yf3jvezd`, film `i0senai6` `2b1u0h6m` `houp0iwv`, sep_heads `m5gn67rl`
 `lf76862i` `rgxuk3g9`.
 
-## 2. The three ways of telling the model which robot it drives are not distinguishable
+## 2. The three ways of telling the model which robot it drives: one real gap, and it is small
 
 - Mean success: token 34.0 ± 2.6%, film 33.3 ± 4.7%, sep_heads 37.7 ± 8.3% (mean ± std over 3 seeds).
   The spread between seeds of one variant (up to ±8.3 pp) is as large as the gaps between variants.
-- On mean success all three pairs are **not distinguishable**: token − film +0.7 pp [−8.0, +6.3],
-  token − sep_heads −3.7 pp [−7.3, +0.0], film − sep_heads −4.3 pp [−9.0, +1.7].
-- Two per-robot gaps have approximate intervals that exclude 0, so they are **provisional only**.
-  sep_heads beats token on PushT by 4.0 pp [−7.3, −0.7 for token − sep_heads], and beats film on
-  FetchPush by 8.7 pp [−16.0, −0.7]. These come from 5 blocks of starts, and the PushT one rests on
-  11 vs 5 successes out of 150. Neither should be quoted as a result until the exact bootstrap confirms it.
-- sep_heads was chosen for the adaptation runs by the pre-set rule (highest mean success). That choice
-  was fine, but its lead is within noise: on this evidence, *which* conditioning method is used does
-  not matter.
+- Exact gaps (A − B, pp [95% interval]):
 
-## 3. Baselines: BC-MLP collapsed to the average action; ResNet-18 is a strong specialist
+  | Pair | PushT | FetchPush | Mean | Verdict |
+  |---|---|---|---|---|
+  | token − film | −4.0 [−9.3, +1.3] | +5.3 [−3.3, +14.0] | +0.7 [−4.3, +5.3] | not distinguishable |
+  | token − sep_heads | −4.0 [−8.7, +0.0] | −3.3 [−10.7, +4.0] | −3.7 [−7.3, +0.0] | not distinguishable |
+  | film − sep_heads | +0.0 [−6.0, +6.0] | **−8.7 [−16.7, −0.7]** | −4.3 [−9.0, +0.3] | real on FetchPush only |
+
+- **sep_heads beats film on FetchPush by 8.7 pp. This is the only real gap.** It holds on the
+  unsolved starts too (65.2% vs 54.8%). But it is weak: the upper end is −0.7 pp, it is 1 of 9
+  conditioning gaps, and the training seeds overlap (sep_heads 62, 66, 76%; film 64, 56, 58%: film's
+  seed 0 beats sep_heads' seed 0).
+- **sep_heads vs token is not distinguishable.** The PushT and mean intervals reach exactly 0
+  (upper end +0.0), so they do not exclude it. The earlier provisional claim "sep_heads beats token on
+  PushT" is dropped.
+- No pair differs on mean success. sep_heads was chosen for the adaptation runs by the pre-set rule
+  (highest mean success). That choice was fine, but its lead is within noise: on this evidence,
+  *which* conditioning method is used barely matters.
+
+## 3. Baselines: BC-MLP collapsed to the average action; the VLA beats ResNet-18 on FetchPush but loses on PushT
 
 - **BC-MLP on FetchPush collapsed to the mean action.** Its training loss drops from about 0.118 to
   0.098 during the 300 warmup steps, then stays flat for 3,800 steps: +0.1%, −0.6%, −0.6% change after
   warmup for seeds 0, 1, 2 (`lv456bp9` `qvkm8zhp` `4g9gno56`). ResNet-18 on the same data keeps falling,
   by about 40% (`4i1b97s2` `3oja5t5i` `nbzs4vx7`). This is why its val loss is 0.0974 in every seed: all
   three ended at the same "always output the average action" solution. BC-MLP's FetchPush success is
-  exactly 5/50 in every seed = **the 10% floor, +0.0 pp**. The success video it saved is on seed
-  100004, one of the already-solved starts. Its PushT success is 0/150. Details:
-  [bc_mlp_fetch.md](bc_mlp_fetch.md), plot `plots/bc_mlp_fetch_loss.png`.
-- The VLA (sep_heads) vs BC-MLP: +7.3 pp on PushT [+3.3, +10.7] and +58.0 pp on FetchPush
-  [+46.7, +70.0]. The FetchPush gap is **real**. Its approximate interval is far from 0, and the
-  pooled Wilson intervals do not even overlap (10.0% [6.2, 15.8] vs 68.0% [60.2, 74.9]), so this
-  conclusion does not depend on how precise the bootstrap is.
-- **ResNet-18 is a per-robot specialist, and it holds its own.** PushT: ResNet-18 14.7% vs the VLA's
-  7.3%. The gap is −7.3 pp [−15.3, −0.7], which is **provisional** (approximate interval, and the Wilson
-  intervals overlap: [9.9, 21.2] vs [4.1, 12.7]). FetchPush: VLA 68.0% vs ResNet-18 51.3% (+41 pp
-  above the floor). The gap is +16.7 pp [−2.0, +37.3]: **not distinguishable**.
-- So the frozen VLA does not beat a separate ResNet-18 per robot, and it may be behind on PushT.
-  Fine-tuning DINOv2 changes the PushT picture (finding 5): full_ft reaches 22.7% PushT, and its gap to
-  ResNet-18 becomes not distinguishable.
+  exactly 5/50 in every seed = **the 10% floor, +0.0 pp**, and the per-seed results now confirm that
+  its 5 wins are exactly the 5 already-solved starts in all three seeds: **0/135 on unsolved starts**.
+  Its PushT success is 0/150. Details: [bc_mlp_fetch.md](bc_mlp_fetch.md), plot `plots/bc_mlp_fetch_loss.png`.
+- **The VLA (sep_heads) vs BC-MLP: both gaps are real.** +7.3 pp on PushT [+4.0, +11.3] and +58.0 pp on
+  FetchPush [+47.3, +68.7].
+- **The VLA (sep_heads, frozen) vs ResNet-18 on FetchPush: +16.7 pp [+3.3, +30.0]. This gap is real.**
+  The VLA scores 68.0% (102/150) and the ResNet-18 specialist 51.3% (77/150). On the 45 unsolved starts:
+  88/135 = 65.2% [56.8, 72.7] vs 68/135 = 50.4% [42.0, 58.7]. Part of the gap comes from the
+  already-solved starts: the VLA keeps 14 of its 15 free wins, while ResNet-18 keeps only 9 of 15 (it
+  sometimes pushes a cube that is already on target away). On the unsolved starts alone the same
+  paired bootstrap gives +14.8 pp [+0.7, +28.9] (computed from the per-seed strings in results.csv), so
+  the gap survives but with less room. Every VLA seed (62, 66, 76%) beats every ResNet-18 seed
+  (52, 52, 50%), so this is not one lucky seed. The earlier approximate version called this gap
+  "not distinguishable"; the exact bootstrap shows it is real.
+- **The VLA vs ResNet-18 on PushT: −7.3 pp [−14.0, −0.7]. Also real, in ResNet-18's favor.**
+  ResNet-18 14.7% (22/150, Wilson [9.9, 21.2]) vs the VLA 7.3% (11/150, [4.1, 12.7]). Its upper end
+  is close to 0 and the seeds overlap (VLA 0, 4, 18%; ResNet-18 16, 20, 8%: the VLA's seed 2 beats two
+  ResNet-18 seeds).
+- So with frozen features, the one shared VLA is **better than a per-robot ResNet-18 on FetchPush and
+  worse on PushT**. The comparison is not budget-matched: both train 4,000 steps, but the VLA uses
+  batch 256 shared by two robots and ResNet-18 batch 128 on one robot.
 
 ## 4. Failure modes seen in the rollout videos
 
@@ -102,45 +119,52 @@ A likely cause of (1) and (2), not tested here: the model is trained with an L1 
 action chunk. Where the demonstrations disagree (go left or right around the T), it learns an average
 of them, which looks like hesitation or a push in a poor direction.
 
-## 5. Adaptation: un-freezing DINOv2 is what helps PushT; LoRA keeps 90% of it overall, but only 41% on PushT
+## 5. Adaptation: un-freezing DINOv2 is what helps PushT; LoRA is clearly behind full fine-tuning only on PushT
 
 All 9 runs finished: sep_heads, 2,500 steps, batch 64, seeds 0–2. frozen_matched is the fair control: same
 batch and steps, encoder frozen. Runs: frozen_matched `516mcmj3` `981owyth` `cw33zzpp`, lora16 `8z9ys2qa`
-`it8rjzpp` `qti0vdx9`, full_ft `rje18trq` `68prcuw5` `xl5yjno6`. ResNet-18 PushT: `331zxjun` `8un5xk7w` `ijmsr80q`.
+`it8rjzpp` `qti0vdx9`, full_ft `rje18trq` `68prcuw5` `xl5yjno6`. ResNet-18: PushT `331zxjun` `8un5xk7w`
+`ijmsr80q`, FetchPush `4i1b97s2` `3oja5t5i` `nbzs4vx7`.
 
-| Mode | PushT | FetchPush (floor 10%) | Mean | Peak GPU memory @200 | Minutes/run |
-|---|---|---|---|---|---|
-| frozen_matched | 1.3 ± 1.2% (2/150) | 46.7 ± 3.1% (+36.7 pp) | 24.0 ± 1.7% | 1.47 GB | 9.6 |
-| lora16 | 9.3 ± 6.4% (14/150) | 59.3 ± 13.0% (+49.3 pp) | 34.3 ± 6.7% | 6.73 GB | 30.1 |
-| full_ft | 22.7 ± 3.1% (34/150) | 53.3 ± 8.3% (+43.3 pp) | 38.0 ± 5.2% | 8.71 GB | 29.7 |
+| Mode | PushT | FetchPush (floor 10%) | FetchPush, unsolved starts | Mean | Peak GPU memory @200 | Minutes/run |
+|---|---|---|---|---|---|---|
+| frozen_matched | 1.3 ± 1.2% (2/150) | 46.7 ± 3.1% (+36.7 pp) | 56/135 = 41.5% [33.5, 49.9] | 24.0 ± 1.7% | 1.47 GB | 9.6 |
+| lora16 | 9.3 ± 6.4% (14/150) | 59.3 ± 13.0% (+49.3 pp) | 75/135 = 55.6% [47.1, 63.7] | 34.3 ± 6.7% | 6.73 GB | 30.1 |
+| full_ft | 22.7 ± 3.1% (34/150) | 53.3 ± 8.3% (+43.3 pp) | 66/135 = 48.9% [40.6, 57.2] | 38.0 ± 5.2% | 8.71 GB | 29.7 |
 
-- **PushT: full fine-tuning is clearly better than the frozen control. This gap is real.** It is
-  +21.3 pp [+18.0, +26.0]. The pooled Wilson intervals do not overlap ([16.7, 30.0] vs [0.4, 4.7]), and
-  every full_ft seed (22, 20, 26%) beats every frozen_matched seed (0, 2, 2%). Letting DINOv2 adapt is
-  what makes PushT work at all at this budget.
-- **PushT: LoRA reaches only 41% of full fine-tuning (9.3% vs 22.7%). This gap is also real.** It is
-  −13.3 pp [−16.0, −10.7]. The Wilson intervals do not overlap ([5.6, 15.1] vs [16.7, 30.0]), and every
-  full_ft seed beats every lora16 seed (14, 12, 2%). LoRA vs the frozen control on PushT is +8.0 pp
-  [+5.3, +11.3]. That one is **provisional**: lora16's seed 2 (2%) ties the control.
-- **FetchPush: no mode is clearly ahead.** LoRA 59.3%, full_ft 53.3%, frozen_matched 46.7%, all well
-  above the 10% floor. **LoRA reaches 111% of full fine-tuning here.** The gaps lora16 − full_ft +6.0 pp
-  [+2.0, +10.0] and lora16 − frozen_matched +12.7 pp [+1.3, +20.7] are **provisional**: their seeds
-  overlap a lot (lora16 46, 72, 60%; full_ft 60, 44, 56%). full_ft − frozen_matched +6.7 pp [−5.3, +16.7]
-  is **not distinguishable**. Unsolved-start ranges: 55–70 / 74–89 / 65–80 of 135.
-- **Mean success: LoRA reaches 90% of full fine-tuning (34.3% vs 38.0%).** That 90% is an average of a
-  big PushT loss and a small FetchPush gain, so per robot (41% and 111%) is the honest way to report it.
-  The mean gap −3.7 pp [−6.3, −1.0] is **provisional**.
+Exact gaps (A − B, pp [95% interval]):
+
+| Pair | PushT | FetchPush | Mean | Verdict |
+|---|---|---|---|---|
+| lora16 − full_ft | **−13.3 [−20.7, −6.7]** | +6.0 [−4.7, +16.7] | −3.7 [−10.7, +3.0] | real on PushT only |
+| lora16 − frozen_matched | **+8.0 [+4.0, +12.7]** | **+12.7 [+1.3, +23.3]** | **+10.3 [+4.7, +16.0]** | real on all three |
+| full_ft − frozen_matched | **+21.3 [+13.3, +29.3]** | +6.7 [−5.3, +19.3] | **+14.0 [+7.7, +20.7]** | real on PushT and mean |
+| full_ft − resnet18 | +8.0 [−1.3, +17.3] | +2.0 [−10.7, +15.3] | – | not distinguishable |
+| lora16 − resnet18 | −5.3 [−12.0, +1.3] | +8.0 [−4.7, +20.7] | – | not distinguishable |
+
+- **lora16 vs full_ft.** LoRA reaches 90% of full fine-tuning's mean success (34.3% vs 38.0%), 41% on
+  PushT (9.3% vs 22.7%) and 111% on FetchPush (59.3% vs 53.3%). Only the PushT gap is real:
+  −13.3 pp [−20.7, −6.7], and every full_ft seed (22, 20, 26%) beats every lora16 seed (14, 12, 2%).
+  The mean gap (−3.7 pp) and the FetchPush gap (+6.0 pp) are **not distinguishable**, so "90%" and
+  "111%" are within noise. The earlier provisional "LoRA is ahead on FetchPush" and "behind on the
+  mean" are both dropped. The honest summary: **LoRA loses clearly on PushT and ties on FetchPush.**
+- **full_ft vs the frozen control.** PushT +21.3 pp and mean +14.0 pp are real; every full_ft seed beats
+  every frozen_matched seed (0, 2, 2%) on PushT. Letting DINOv2 adapt is what makes PushT work at all at
+  this budget. FetchPush +6.7 pp is not distinguishable.
+- **lora16 vs the frozen control: real on PushT, FetchPush and the mean** (earlier provisional, now
+  confirmed). LoRA helps over frozen features. The training seeds still overlap a little: on PushT
+  lora16's seed 2 (2%) ties the control's best seeds (2%), and on FetchPush lora16's seed 0 (46%) is
+  inside the control's range (44–50%).
 - **Memory: LoRA uses 23% less peak GPU memory than full fine-tuning (6.73 vs 8.71 GB at step 200).**
   It uses 4.6 times more than frozen features (1.47 GB). The adapters are tiny (442,368 vs 22,056,576
   trainable DINOv2 parameters). But both modes still run DINOv2 forward and backward on every image,
   so the activation memory stays. LoRA only saves DINOv2's weight gradients and optimizer state. Time:
   LoRA and full fine-tuning both take about 30 minutes per run (frozen: about 10), so LoRA saves no time.
-- **full_ft PushT vs the ResNet-18 specialist: not distinguishable.** full_ft has 22.7 ± 3.1%
-  (34/150, Wilson [16.7, 30.0]) and ResNet-18 has 14.7 ± 6.1% (22/150, [9.9, 21.2]). The gap is
-  +8.0 pp [−3.3, +16.0], and the intervals overlap. So the fine-tuned VLA closes the PushT gap that
-  the frozen VLA had (finding 3), but it does not beat ResNet-18. On FetchPush, full_ft − ResNet-18 is
-  +2.0 pp [−14.7, +18.7]: not distinguishable either. The comparison is not budget-matched: ResNet-18
-  trained 4,000 steps at batch 128 on one robot, the VLA 2,500 steps at batch 64 shared by both robots.
+- **Adapted VLA vs the ResNet-18 specialist: not distinguishable on either robot**, for both full_ft
+  and lora16. So the fine-tuned VLA closes the PushT gap that the frozen VLA had (finding 3), but does
+  not beat ResNet-18; and at this smaller budget it also loses the FetchPush lead that the frozen VLA
+  had at 4,000 steps × 256. Not budget-matched: ResNet-18 trained 4,000 steps at batch 128 on one robot,
+  the adapted VLA 2,500 steps at batch 64 shared by both robots.
 - **The training budget matters as much as the encoder.** frozen_matched (2,500 steps × 64 = 160k
   samples) scores 24.0% mean, against 37.7% for the same frozen sep_heads model at 4,000 steps × 256
   (1.0M samples). On PushT, full_ft at the small budget (22.7%) beats frozen sep_heads at the large
@@ -148,18 +172,24 @@ batch and steps, encoder frozen. Runs: frozen_matched `516mcmj3` `981owyth` `cw3
 
 ---
 
+## What changed from the 2026-11-26 version (approximate → exact bootstrap)
+
+- Confirmed real: sep_heads > film on FetchPush; lora16 > frozen_matched on PushT, FetchPush and mean;
+  VLA sep_heads < ResNet-18 on PushT.
+- Newly real: VLA sep_heads > ResNet-18 on FetchPush (was "not distinguishable").
+- Dropped (now not distinguishable): sep_heads > token on PushT; lora16 > full_ft on FetchPush;
+  lora16 < full_ft on the mean.
+- Still real: full_ft > frozen_matched and full_ft > lora16 on PushT; VLA > BC-MLP on both robots.
+- The FetchPush "unsolved starts" ranges are now exact counts, and BC-MLP's 5 wins per seed are
+  confirmed to be exactly the 5 already-solved starts.
+
 ## What would change these numbers
 
-- **Per-seed results.** Download the Kaggle output folders (each run's `metrics.json`) into
-  `outputs/kaggle/` and rerun `.venv/bin/python scripts/aggregate.py`. The "approx." intervals then
-  become exact paired bootstraps over the 50 start seeds. The FetchPush "unsolved starts" ranges then
-  become exact counts, and the provisional gaps in findings 2, 3 and 5 are either confirmed or dropped.
-  The files to download are the run folders under `/kaggle/working/outputs/` (for example
-  `sep_heads-lora16-s2-bd071b5/metrics.json`), from each batch notebook's Output tab. The `.ipynb`
-  notebooks themselves are not enough.
-  Runs from now on also save per-seed results to W&B (`eval/<robot>_episode_success`).
-- **The adaptation gaps.** With per-seed data, check the provisional FetchPush and mean gaps in finding 5.
-  The two "real" PushT gaps are expected to stay real, given how far apart the seeds are.
-- The bootstrap treats each training seed as fixed: it measures luck in the start states, not luck in
-  training. The mean ± std columns show training luck, and it is large (sep_heads PushT ranges 0–18%
-  across seeds).
+- **More training seeds.** The bootstrap only covers start-state luck. Several real gaps (sep_heads −
+  film on FetchPush, VLA − ResNet-18 on PushT, lora16 − frozen_matched) have overlapping training seeds,
+  and with 3 seeds per model the seed-to-seed spread is large (sep_heads PushT ranges 0–18%).
+- **More start seeds.** 50 starts per robot give intervals about ±7–15 pp wide; borderline gaps such as
+  sep_heads − film (upper end −0.7 pp) or token − sep_heads (upper end +0.0 pp) could flip either way.
+- **Budget-matched comparisons.** The adapted runs (2,500 × 64) and the baselines (4,000 × 128) and
+  frozen VLA (4,000 × 256) use different budgets, so VLA vs ResNet-18 and frozen vs adapted across
+  batches are not like-for-like.

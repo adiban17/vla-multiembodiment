@@ -126,6 +126,7 @@ notebooks/kaggle_cells.md   the two Kaggle cells
   results/ + the README block between `<!-- results:start -->` and `<!-- results:end -->` (never edit inside it by hand).
   W&B has only per-run totals for runs before Phase 7: per-seed results come from Kaggle `metrics.json` files put under
   `outputs/kaggle/` (`--episodes-dir`); otherwise the paired bootstrap uses the 5 ten-episode blocks in `output.log`,
-  labeled "approx." and never called real. `log_eval` now also writes `eval/<robot>_episode_success` ("0110...").
+  labeled "approx." and never called real. Since 2026-11-27 all 30 runs have metrics.json in `outputs/kaggle/`,
+  so every gap in results/ is exact. `log_eval` now also writes `eval/<robot>_episode_success` ("0110...").
   Gap rule: real only if the exact bootstrap interval excludes 0. GIFs: best seed of the best variant, captioned as
   an illustration. matplotlib 3.11.2 (Mac only). Downloads are cached in `outputs/aggregate_cache/`.
