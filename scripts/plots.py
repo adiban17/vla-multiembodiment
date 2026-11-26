@@ -117,8 +117,9 @@ def adaptation_plot(rows, out: Path) -> Path:
         sd = 100 * succ.std(ddof=1) if len(succ) > 1 else 0.0
         ax.errorbar(mm, ms, yerr=sd, fmt="o", markersize=8, color=SERIES[j], markeredgecolor=SURFACE,
                     markeredgewidth=2, ecolor=SERIES[j], elinewidth=1.4, capsize=4, zorder=3, label=mode)
-        ax.annotate(f"{mode}  ({len(pts)}/3 seeds)", (mm, ms), xytext=(10, 6), textcoords="offset points",
-                    color=INK, fontsize=9)
+        left = mode == "lora16"  # sits next to full_ft: label it on the left so the two never collide
+        ax.annotate(f"{mode}  ({len(pts)}/3 seeds)", (mm, ms), xytext=(-12 if left else 10, 6),
+                    textcoords="offset points", ha="right" if left else "left", color=INK, fontsize=9)
     if not drawn:
         ax.text(0.5, 0.5, "No adaptation runs finished yet.\nRerun scripts/aggregate.py later.",
                 transform=ax.transAxes, ha="center", va="center", color=INK2, fontsize=11)

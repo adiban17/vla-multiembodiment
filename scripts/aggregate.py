@@ -667,6 +667,17 @@ def table_adaptation(rows) -> tuple[list[str], dict]:
     if pairs:
         lines += ["Gaps between adaptation modes:", ""]
         lines += _gap_rows(pairs, ("pusht", "fetch", "mean"), "Same bootstrap as in table 1.") + [""]
+    vs_resnet = []
+    for m in ("full_ft", "lora16"):
+        ra = config_rows(rows, "adaptation", m)
+        rp, rf = config_rows(rows, "baseline", "resnet18-pusht"), config_rows(rows, "baseline", "resnet18-fetch")
+        if ra and rp and rf:
+            vs_resnet.append((f"{m} − resnet18", {"pusht": compare(ra, rp, "pusht"), "fetch": compare(ra, rf, "fetch")}))
+    if vs_resnet:
+        lines += ["Adapted VLA vs the ResNet-18 specialist (ResNet-18: 4,000 steps, batch 128, one robot per model; "
+                  "adapted VLA: 2,500 steps, batch 64, one model for both robots):", ""]
+        lines += _gap_rows(vs_resnet, ("pusht", "fetch"), "Same bootstrap as in table 1.") + [""]
+    pairs = pairs + vs_resnet
     return lines, {"summaries": sums, "pairs": pairs}
 
 

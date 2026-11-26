@@ -2,16 +2,19 @@
 
 Written on 2026-11-26 from `results/results.csv` and the tables in the README (both made by
 `scripts/aggregate.py`). Every number below comes from those files, and the W&B run IDs are given
-in brackets. **Status when written:** all 9 conditioning runs and all 12 baseline runs had finished.
-Only 2 of the 9 adaptation runs had finished (seed 0 of lora16 and full_ft).
+in brackets. **Status:** all 30 planned runs have finished (9 conditioning, 12 baseline, 9 adaptation).
 
 **How to read the gaps.** A gap between two models is called **real** only if its 95% paired-bootstrap
-interval excludes 0. Otherwise it is **not distinguishable**. W&B does not hold per-seed results for
-these runs (only totals such as 32/50), so every bootstrap below is the approximate one: it
-resamples 5 blocks of 10 start seeds read from the console logs. Five units are too few for a
-trustworthy interval. So an approximate interval that excludes 0 is reported as **provisional**, not
-as real. The exact bootstrap over the 50 start seeds will replace it once the Kaggle `metrics.json`
-files are downloaded (see "What would change these numbers").
+interval excludes 0. Otherwise it is **not distinguishable**. Per-seed results are still not available:
+W&B holds only totals such as 32/50 for these runs, and the downloaded Kaggle notebooks
+(`outputs/kaggle/*.ipynb`) hold only the console output, not the run folders' `metrics.json`. So every
+bootstrap below is the approximate one: it resamples 5 blocks of 10 start seeds read from the console
+logs. Five units are too few for a trustworthy interval, so an approximate interval that excludes 0 is
+**provisional**, not real. There is one exception. A gap is called real when the approximate interval
+excludes 0, the pooled Wilson intervals do not overlap, *and* every training seed of one model beats
+every seed of the other. Such a gap is too large for the bootstrap's precision to matter. The exact
+bootstrap over the 50 start seeds will replace all of this once the `metrics.json` files are downloaded
+(see "What would change these numbers").
 
 **The FetchPush floor.** 5 of the 50 FetchPush starts (seeds 100004, 100010, 100021, 100036, 100049)
 already have the cube within 5 cm of the target. A robot that does nothing therefore scores 10%. Every
@@ -68,7 +71,9 @@ Runs: token `neo2m4ux` `vzqwyyqd` `yf3jvezd`, film `i0senai6` `2b1u0h6m` `houp0i
   7.3%. The gap is −7.3 pp [−15.3, −0.7], which is **provisional** (approximate interval, and the Wilson
   intervals overlap: [9.9, 21.2] vs [4.1, 12.7]). FetchPush: VLA 68.0% vs ResNet-18 51.3% (+41 pp
   above the floor). The gap is +16.7 pp [−2.0, +37.3]: **not distinguishable**.
-- So the shared VLA does not yet beat a separate ResNet-18 per robot. It may even be behind on PushT.
+- So the frozen VLA does not beat a separate ResNet-18 per robot, and it may be behind on PushT.
+  Fine-tuning DINOv2 changes the PushT picture (finding 5): full_ft reaches 22.7% PushT, and its gap to
+  ResNet-18 becomes not distinguishable.
 
 ## 4. Failure modes seen in the rollout videos
 
@@ -97,24 +102,49 @@ A likely cause of (1) and (2), not tested here: the model is trained with an L1 
 action chunk. Where the demonstrations disagree (go left or right around the T), it learns an average
 of them, which looks like hesitation or a push in a poor direction.
 
-## 5. Adaptation (preliminary, 1 of 3 seeds): LoRA saves less memory than expected and scores lower
+## 5. Adaptation: un-freezing DINOv2 is what helps PushT; LoRA keeps 90% of it overall, but only 41% on PushT
 
-Only seed 0 of lora16 (`8z9ys2qa`) and full_ft (`rje18trq`) had finished. frozen_matched, the fair
-frozen control, had not.
+All 9 runs finished: sep_heads, 2,500 steps, batch 64, seeds 0–2. frozen_matched is the fair control: same
+batch and steps, encoder frozen. Runs: frozen_matched `516mcmj3` `981owyth` `cw33zzpp`, lora16 `8z9ys2qa`
+`it8rjzpp` `qti0vdx9`, full_ft `rje18trq` `68prcuw5` `xl5yjno6`. ResNet-18 PushT: `331zxjun` `8un5xk7w` `ijmsr80q`.
 
-- Mean success: full fine-tuning 41.0% (PushT 22.0%, FetchPush 60.0%), LoRA 30.0% (PushT 14.0%,
-  FetchPush 46.0%). **LoRA reached 73% of full fine-tuning** (PushT 64%, FetchPush 77%). The gap
-  lora16 − full_ft is −11.0 pp [−15.0, −5.0] on the mean. That is **provisional**: one seed each, and
-  the approximate bootstrap.
-- Peak GPU memory at step 200: LoRA 6.73 GB vs full fine-tuning 8.71 GB = **23% lower**. That is a
-  real but modest saving. The adapters themselves are tiny (442,368 vs 22,056,576 trainable DINOv2
-  parameters), but both modes still run the full DINOv2 forward and backward pass over the images
-  at batch 64. LoRA mainly saves the optimizer state and the weight gradients of DINOv2.
-- Time: both took about 31 minutes per run, including evaluation (31.7 vs 31.1). LoRA saved no time.
-- FetchPush vs the floor: full fine-tuning 60.0% (+50 pp), LoRA 46.0% (+36 pp).
-- Something to watch, not a finding: full fine-tuning's 22% on PushT (11/50) is the best PushT rate of
-  any VLA run so far. It is one seed, though. frozen_matched must also finish before we can say whether
-  un-freezing helps, or whether the smaller batch at 2,500 steps does.
+| Mode | PushT | FetchPush (floor 10%) | Mean | Peak GPU memory @200 | Minutes/run |
+|---|---|---|---|---|---|
+| frozen_matched | 1.3 ± 1.2% (2/150) | 46.7 ± 3.1% (+36.7 pp) | 24.0 ± 1.7% | 1.47 GB | 9.6 |
+| lora16 | 9.3 ± 6.4% (14/150) | 59.3 ± 13.0% (+49.3 pp) | 34.3 ± 6.7% | 6.73 GB | 30.1 |
+| full_ft | 22.7 ± 3.1% (34/150) | 53.3 ± 8.3% (+43.3 pp) | 38.0 ± 5.2% | 8.71 GB | 29.7 |
+
+- **PushT: full fine-tuning is clearly better than the frozen control. This gap is real.** It is
+  +21.3 pp [+18.0, +26.0]. The pooled Wilson intervals do not overlap ([16.7, 30.0] vs [0.4, 4.7]), and
+  every full_ft seed (22, 20, 26%) beats every frozen_matched seed (0, 2, 2%). Letting DINOv2 adapt is
+  what makes PushT work at all at this budget.
+- **PushT: LoRA reaches only 41% of full fine-tuning (9.3% vs 22.7%). This gap is also real.** It is
+  −13.3 pp [−16.0, −10.7]. The Wilson intervals do not overlap ([5.6, 15.1] vs [16.7, 30.0]), and every
+  full_ft seed beats every lora16 seed (14, 12, 2%). LoRA vs the frozen control on PushT is +8.0 pp
+  [+5.3, +11.3]. That one is **provisional**: lora16's seed 2 (2%) ties the control.
+- **FetchPush: no mode is clearly ahead.** LoRA 59.3%, full_ft 53.3%, frozen_matched 46.7%, all well
+  above the 10% floor. **LoRA reaches 111% of full fine-tuning here.** The gaps lora16 − full_ft +6.0 pp
+  [+2.0, +10.0] and lora16 − frozen_matched +12.7 pp [+1.3, +20.7] are **provisional**: their seeds
+  overlap a lot (lora16 46, 72, 60%; full_ft 60, 44, 56%). full_ft − frozen_matched +6.7 pp [−5.3, +16.7]
+  is **not distinguishable**. Unsolved-start ranges: 55–70 / 74–89 / 65–80 of 135.
+- **Mean success: LoRA reaches 90% of full fine-tuning (34.3% vs 38.0%).** That 90% is an average of a
+  big PushT loss and a small FetchPush gain, so per robot (41% and 111%) is the honest way to report it.
+  The mean gap −3.7 pp [−6.3, −1.0] is **provisional**.
+- **Memory: LoRA uses 23% less peak GPU memory than full fine-tuning (6.73 vs 8.71 GB at step 200).**
+  It uses 4.6 times more than frozen features (1.47 GB). The adapters are tiny (442,368 vs 22,056,576
+  trainable DINOv2 parameters). But both modes still run DINOv2 forward and backward on every image,
+  so the activation memory stays. LoRA only saves DINOv2's weight gradients and optimizer state. Time:
+  LoRA and full fine-tuning both take about 30 minutes per run (frozen: about 10), so LoRA saves no time.
+- **full_ft PushT vs the ResNet-18 specialist: not distinguishable.** full_ft has 22.7 ± 3.1%
+  (34/150, Wilson [16.7, 30.0]) and ResNet-18 has 14.7 ± 6.1% (22/150, [9.9, 21.2]). The gap is
+  +8.0 pp [−3.3, +16.0], and the intervals overlap. So the fine-tuned VLA closes the PushT gap that
+  the frozen VLA had (finding 3), but it does not beat ResNet-18. On FetchPush, full_ft − ResNet-18 is
+  +2.0 pp [−14.7, +18.7]: not distinguishable either. The comparison is not budget-matched: ResNet-18
+  trained 4,000 steps at batch 128 on one robot, the VLA 2,500 steps at batch 64 shared by both robots.
+- **The training budget matters as much as the encoder.** frozen_matched (2,500 steps × 64 = 160k
+  samples) scores 24.0% mean, against 37.7% for the same frozen sep_heads model at 4,000 steps × 256
+  (1.0M samples). On PushT, full_ft at the small budget (22.7%) beats frozen sep_heads at the large
+  one (7.3%). That comparison mixes budget and encoder, so it is an observation, not a measured gap.
 
 ---
 
@@ -124,9 +154,12 @@ frozen control, had not.
   `outputs/kaggle/` and rerun `.venv/bin/python scripts/aggregate.py`. The "approx." intervals then
   become exact paired bootstraps over the 50 start seeds. The FetchPush "unsolved starts" ranges then
   become exact counts, and the provisional gaps in findings 2, 3 and 5 are either confirmed or dropped.
+  The files to download are the run folders under `/kaggle/working/outputs/` (for example
+  `sep_heads-lora16-s2-bd071b5/metrics.json`), from each batch notebook's Output tab. The `.ipynb`
+  notebooks themselves are not enough.
   Runs from now on also save per-seed results to W&B (`eval/<robot>_episode_success`).
-- **The adaptation batch.** Rerun the script when it finishes. Finding 5 should then be rewritten with
-  3 seeds per mode and the frozen_matched control.
+- **The adaptation gaps.** With per-seed data, check the provisional FetchPush and mean gaps in finding 5.
+  The two "real" PushT gaps are expected to stay real, given how far apart the seeds are.
 - The bootstrap treats each training seed as fixed: it measures luck in the start states, not luck in
   training. The mean ± std columns show training luck, and it is large (sep_heads PushT ranges 0–18%
   across seeds).
